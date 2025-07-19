@@ -2,7 +2,10 @@
 # Purpose: Synchronizes data between the SQLite database (debt_manager.db)
 #          and the Excel dashboard (DebtDashboard.xlsx).
 # Deploy in: C:\DebtTracker
-# Version: 1.0 (2025-07-19) - Initial version. Uses openpyxl for Excel and
+# Version: 1.3 (2025-07-19) - Enhanced data sanitization to explicitly handle null bytes and
+#          other problematic characters, resolving IllegalCharacterError.
+#          Confirmed compatibility with updated config.py schemas
+#          and db_manager queries. Uses openpyxl for Excel and
 #          sqlite3 for database operations. Designed to replace PowerShell sync
 #          logic and work seamlessly with the openpyxl-based Excel template.
 
@@ -11,10 +14,11 @@ import logging
 import sqlite3
 from openpyxl import load_workbook, Workbook
 from openpyxl.utils import get_column_letter
-import pandas as pd # Using pandas for easier data handling between DB and Excel
-import time # For potential delays if needed for file access
+import pandas as pd
+import re # Import regex for sanitization
 
 from config import DB_PATH, EXCEL_PATH, TABLE_SCHEMAS, LOG_FILE, LOG_DIR
+import debt_manager_db_manager as db_manager
 
 # Ensure log directory exists
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -28,6 +32,30 @@ if not logging.getLogger().handlers:
                             logging.StreamHandler()
                         ])
 
+def sanitize_excel_string(value):
+    """
+    Removes characters that are illegal or problematic in Excel cell values,
+    especially null bytes and other control characters.
+    Ensures the value is a string before sanitizing.
+    """
+    if value is None:
+        return "" # Convert None to empty string for Excel
+    if not isinstance(value, str):
+        return value # Return non-string values as is (numbers, booleans, dates handled by openpyxl)
+
+    # Explicitly replace null bytes, which are a common cause of IllegalCharacterError
+    cleaned_text = value.replace('\x00', '')
+
+    # Remove other control characters (excluding common ones like tab, newline, carriage return)
+    # This regex matches characters in the ASCII range 0-31, excluding 9 (tab), 10 (LF), 13 (CR)
+    cleaned_text = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', cleaned_text)
+
+    # Optionally, remove characters that might cause issues in some Excel versions
+    # This is a broader sweep for potentially problematic Unicode characters
+    # cleaned_text = ''.join(char for char in cleaned_text if char.isprintable() or char in ('\n', '\t', '\r'))
+
+    return cleaned_text
+
 def sqlite_to_excel():
     """
     Synchronizes data from SQLite database tables to corresponding Excel sheets.
@@ -40,7 +68,6 @@ def sqlite_to_excel():
         cursor = conn.cursor()
 
         # Load the Excel workbook
-        # If the workbook doesn't exist or is corrupted, create a new one.
         if os.path.exists(EXCEL_PATH):
             try:
                 wb = load_workbook(EXCEL_PATH)
@@ -64,16 +91,13 @@ def sqlite_to_excel():
             else:
                 ws = wb[sheet_name]
 
-            # Fetch data from SQLite
-            cursor.execute(f"SELECT * FROM {table_name}")
-            rows = cursor.fetchall()
+            # Fetch data from SQLite using db_manager's get_table_data for consistency
+            df_sqlite = db_manager.get_table_data(table_name)
 
-            # Get column names from SQLite table schema
-            column_names = [description[0] for description in cursor.description]
+            # Get column names from the DataFrame, which reflects the query output (including joined cols)
+            column_names = list(df_sqlite.columns)
 
             # Clear existing data in the Excel sheet (keep headers if they exist)
-            # Find the last row with data (assuming headers are in row 1)
-            # Iterate from row 2 downwards and clear content
             for row_idx in range(ws.max_row, 1, -1):
                 ws.delete_rows(row_idx)
 
@@ -83,26 +107,22 @@ def sqlite_to_excel():
                 ws.cell(row=1, column=col_idx, value=header)
 
             # Write data rows
-            for row_data in rows:
-                # Map SQLite row data to Excel columns based on schema['excel_columns']
-                # This ensures the order and inclusion of columns matches the Excel template
+            for index, row_data in df_sqlite.iterrows():
                 mapped_row = []
                 for col_name in excel_headers:
-                    try:
-                        # Find the index of the column name in SQLite's fetched column_names
-                        col_index_in_sqlite = column_names.index(col_name)
-                        mapped_row.append(row_data[col_index_in_sqlite])
-                    except ValueError:
-                        # If a column exists in excel_columns but not in SQLite, append None
-                        mapped_row.append(None)
+                    if col_name in row_data:
+                        # Sanitize the value before appending to Excel
+                        sanitized_value = sanitize_excel_string(row_data[col_name])
+                        mapped_row.append(sanitized_value)
+                    else:
+                        mapped_row.append(None) # Append None if column not in DataFrame
                 ws.append(mapped_row)
 
             # Auto-adjust column widths based on content
             for col_idx, header_text in enumerate(excel_headers, 1):
                 max_length = len(header_text)
-                # Iterate through data rows to find max length
-                for row_data in ws.iter_rows(min_row=2, min_col=col_idx, max_col=col_idx):
-                    for cell in row_data:
+                for row_data_cell in ws.iter_rows(min_row=2, min_col=col_idx, max_col=col_idx):
+                    for cell in row_data_cell:
                         if cell.value is not None:
                             cell_length = len(str(cell.value))
                             if cell_length > max_length:
@@ -186,14 +206,8 @@ def excel_to_sqlite():
             logging.info("SQLite connection closed after sync.")
 
 if __name__ == "__main__":
-    # Example usage:
-    # You can call these functions based on your orchestration needs.
-    # For instance, if you want to push data from SQLite to Excel on startup:
     try:
         sqlite_to_excel()
-        # If you want to also pull data from Excel to SQLite after some user interaction:
-        # excel_to_sqlite()
         print("Excel-SQLite synchronization script executed. Check DebugLog.txt for details.")
     except Exception as e:
         print(f"Failed to execute Excel-SQLite synchronization: {e}. See DebugLog.txt for errors.")
-

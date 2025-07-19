@@ -3,10 +3,8 @@
 #          Allows users to view, add, edit, and delete records for debts, accounts,
 #          payments, goals, assets, revenue, and categories.
 # Deploy in: C:\DebtTracker
-# Version: 1.1 (2025-07-19) - Added comprehensive error handling and logging
-#          within the GUI application to catch early startup crashes.
-#          Improved robustness for combo box data loading, especially for
-#          multi-source fields like 'AllocatedTo'.
+# Version: 1.6 (2025-07-19) - Fixed UnboundLocalError: 'pk_col_name_from_schema'
+#                            by ensuring primary key variable is always defined.
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -18,6 +16,9 @@ import logging
 # Import database manager functions and configuration
 import debt_manager_db_manager as db_manager
 from config import TABLE_SCHEMAS, LOG_FILE, LOG_DIR
+
+# Import the new CSV synchronization function
+from debt_manager_csv_sync import sqlite_to_csv # Renamed from excel_sync to csv_sync
 
 # Ensure log directory exists
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -67,17 +68,19 @@ class DebtManagerApp(tk.Tk):
             self.create_dashboard_tab()
 
             # Create tabs for each table defined in TABLE_SCHEMAS
-            for table_name, schema in TABLE_SCHEMAS.items():
-                if table_name == 'Categories': # Categories tab will be handled slightly differently
+            # Order them specifically
+            tab_order = ['Debts', 'Accounts', 'Payments', 'Goals', 'Assets', 'Revenue', 'Categories']
+            for table_name in tab_order:
+                schema = TABLE_SCHEMAS[table_name]
+                if table_name == 'Categories':
                     self.create_categories_tab()
                 else:
                     self.create_data_tab(table_name, schema['primary_key'], schema['gui_fields'])
 
-            # Re-order tabs if necessary (e.g., Dashboard first)
+            # Add tabs to notebook in desired order
             self.notebook.add(self.tabs['Dashboard']['frame'], text='Dashboard')
-            for tab_name in ['Debts', 'Accounts', 'Payments', 'Goals', 'Assets', 'Revenue', 'Categories']:
-                if tab_name in self.tabs and tab_name != 'Dashboard':
-                    self.notebook.add(self.tabs[tab_name]['frame'], text=tab_name)
+            for tab_name in tab_order:
+                self.notebook.add(self.tabs[tab_name]['frame'], text=tab_name)
 
             # Add a Reports tab
             self.create_reports_tab()
@@ -95,6 +98,7 @@ class DebtManagerApp(tk.Tk):
             self.tabs['Dashboard'] = {'frame': frame}
 
             # Treeview for Snowball Data
+            # Note: The columns here should match the output of get_table_data for Debts
             columns = ['Creditor', 'Amount', 'MinimumPayment', 'SnowballPayment', 'Status']
             self.tabs['Dashboard']['tree'] = ttk.Treeview(frame, columns=columns, show='headings')
             for col in columns:
@@ -109,7 +113,7 @@ class DebtManagerApp(tk.Tk):
             self.tabs['Dashboard']['tree'].pack(side='left', fill='both', expand=True)
 
             # Load Data Button
-            load_btn = ttk.Button(frame, text="Load Snowball Data", command=self.load_dashboard_data)
+            load_btn = ttk.Button(frame, text="Refresh Dashboard Data", command=self.load_dashboard_data)
             load_btn.pack(pady=5)
 
             # Summary Labels (placeholders for now)
@@ -160,19 +164,19 @@ class DebtManagerApp(tk.Tk):
                     f"${row['SnowballPayment']:.2f}",
                     row['Status']
                 ))
-            logging.info(f"Loaded snowball data ({len(snowball_debts)} rows) for Dashboard.")
+            logging.info(f"Loaded snowball data ({len(snowball_debts)} debts) for Dashboard.")
 
             # Update summary labels
             total_debt = debts_df[
                 (debts_df['Status'] != 'Paid Off') &
                 (debts_df['Status'] != 'Closed')
-            ]['Amount'].sum()
+            ]['Amount'].sum() if not debts_df.empty else 0.0
 
             accounts_df = db_manager.get_table_data('Accounts')
             total_savings = accounts_df[
                 (accounts_df['AccountType'].isin(['Checking', 'Savings', 'Investment'])) &
                 (accounts_df['Status'].isin(['Open', 'Current', 'Active']))
-            ]['Balance'].sum()
+            ]['Balance'].sum() if not accounts_df.empty else 0.0
 
             net_worth = total_savings - total_debt
 
@@ -207,7 +211,7 @@ class DebtManagerApp(tk.Tk):
                 logging.info(f"Generated and displayed {len(projection_df)} rows of financial projection.")
             else:
                 logging.warning("Projection: No projection data generated.")
-                messagebox.showinfo("Projection", "No data available to generate financial projection.")
+                # messagebox.showinfo("Projection", "No data available to generate financial projection.") # Avoid too many popups
         except Exception as e:
             logging.error(f"Projection: Error generating projection: {e}", exc_info=True)
             messagebox.showerror("Projection Error", f"An error occurred while generating the projection: {e}\nCheck DebugLog.txt for details.")
@@ -221,21 +225,20 @@ class DebtManagerApp(tk.Tk):
             self.tabs[table_name] = {'frame': frame, 'primary_key': primary_key, 'gui_fields': gui_fields}
 
             # Treeview
-            columns = [field['name'] for field in gui_fields] # Use GUI field names for display
-            # Add primary key to columns for internal use, but don't show it as heading
-            columns_with_pk = [primary_key] + columns
+            # Use GUI field names for display, but ensure primary_key is the first hidden column
+            display_columns = [field['name'] for field in gui_fields]
+            tree_columns = [primary_key] + display_columns # Internal column first, then display columns
 
-            tree = ttk.Treeview(frame, columns=columns_with_pk, show='headings')
+            tree = ttk.Treeview(frame, columns=tree_columns, show='headings')
             self.tabs[table_name]['tree'] = tree
 
             # Configure headings and columns
-            for col_name in columns:
+            tree.column(primary_key, width=0, stretch=tk.NO) # Hide the primary key column
+            tree.heading(primary_key, text="") # No heading text for PK
+
+            for col_name in display_columns:
                 tree.heading(col_name, text=col_name)
                 tree.column(col_name, width=120, anchor='center')
-
-            # Hide the primary key column
-            tree.column(primary_key, width=0, stretch=tk.NO) # Hide it
-            tree.heading(primary_key, text="") # No heading text
 
             tree.pack(pady=10, padx=10, fill='both', expand=True)
 
@@ -286,8 +289,9 @@ class DebtManagerApp(tk.Tk):
             self.tabs['Categories'] = {'frame': frame, 'primary_key': 'CategoryID', 'gui_fields': TABLE_SCHEMAS['Categories']['gui_fields']}
 
             # Treeview
-            columns = ['CategoryName']
-            tree = ttk.Treeview(frame, columns=['CategoryID'] + columns, show='headings')
+            display_columns = ['CategoryName']
+            tree_columns = ['CategoryID'] + display_columns
+            tree = ttk.Treeview(frame, columns=tree_columns, show='headings')
             self.tabs['Categories']['tree'] = tree
 
             tree.heading('CategoryName', text='CategoryName')
@@ -366,23 +370,63 @@ class DebtManagerApp(tk.Tk):
             df = db_manager.get_table_data(table_name)
             if df.empty:
                 logging.info(f"LoadData: No data found for {table_name}.")
-                # messagebox.showinfo("Load Data", f"No data available in {table_name}.") # Avoid too many popups
                 return
 
-            # Ensure correct column order for display based on gui_fields, and include PK for internal use
+            # Determine the columns to display in the Treeview
+            # This should match the 'tree_columns' defined in create_data_tab
+            pk_col = self.tabs[table_name]['primary_key']
             display_columns = [field['name'] for field in TABLE_SCHEMAS[table_name]['gui_fields']]
-            all_cols = [self.tabs[table_name]['primary_key']] + display_columns
+            all_tree_columns = [pk_col] + display_columns
+
+            # Ensure DataFrame has all columns expected by the Treeview, in order
+            # Handle cases where a joined column (like CategoryName) might not be present if no join occurred
+            for col in all_tree_columns:
+                if col not in df.columns:
+                    # If it's a 'display_col' from a combo box, look for its corresponding 'value_col' in df
+                    found_mapping_col = False
+                    for field_info in TABLE_SCHEMAS[table_name]['gui_fields']:
+                        if field_info['name'] == col and field_info['type'] == 'combo' and 'source_value_col' in field_info:
+                            if field_info['source_value_col'] in df.columns:
+                                df[col] = df[field_info['source_value_col']] # Use the raw ID
+                                found_mapping_col = True
+                                break
+                    if not found_mapping_col:
+                        df[col] = None # Add missing columns as None
 
             # Reorder DataFrame columns to match the Treeview's expected order
-            # Also handle potential missing columns in DB by adding them as None
-            for col in all_cols:
-                if col not in df.columns:
-                    df[col] = None # Add missing columns as None
-
-            df = df[all_cols] # Reorder DataFrame columns
+            df = df[all_tree_columns]
 
             for index, row in df.iterrows():
-                values = tuple(row.values)
+                # Convert values to strings for display, especially for dates/floats
+                values = []
+                for col_name in all_tree_columns:
+                    val = row[col_name]
+                    # Special handling for foreign key display in Treeview
+                    # Check if the column is a foreign key with a display column from another table
+                    if col_name != pk_col: # Don't format the hidden PK
+                        field_info = next((f for f in TABLE_SCHEMAS[table_name]['gui_fields'] if f['name'] == col_name), None)
+                        if field_info and field_info.get('type') == 'combo' and 'source_display_col' in field_info and 'source_value_col' in field_info:
+                            # If it's a foreign key, and db_manager returned both ID and Name (e.g., DebtName (ID 1)), use the name
+                            # Or if db_manager directly returned the name (e.g., CategoryName)
+                            # The 'value' from the row could be the ID or the joined name.
+                            # We want the display name for the Treeview.
+                            display_col_from_db = field_info['source_display_col']
+                            value_col_from_db = field_info['source_value_col']
+
+                            # Check if the row contains the explicit display column from the join
+                            if display_col_from_db in row and row[display_col_from_db] is not None:
+                                display_val = str(row[display_col_from_db])
+                                if value_col_from_db != display_col_from_db and value_col_from_db in row and row[value_col_from_db] is not None:
+                                     # Append ID in parentheses if different for clarity in Treeview
+                                     display_val = f"{display_val} ({row[value_col_from_db]})"
+                                values.append(display_val)
+                                continue # Move to next column
+                            # Fallback if display column not found or is None, use the raw value (ID)
+                            elif val is not None:
+                                values.append(str(val))
+                                continue
+                    values.append(str(val) if val is not None else '')
+
                 tree.insert('', 'end', values=values)
             logging.info(f"LoadData: Loaded data for {table_name} ({len(df)} rows).")
         except Exception as e:
@@ -398,11 +442,13 @@ class DebtManagerApp(tk.Tk):
             form_window.geometry("400x600")
             form_window.transient(self) # Make dialog modal
 
-            fields_data = {} # To store Tkinter variables for each field
             entries = {}     # To store Tkinter widgets for each field
 
             selected_item_id = None
             current_record_data = {}
+            # Ensure pk_col_name_from_schema is always defined
+            pk_col_name_from_schema = self.tabs[table_name]['primary_key']
+
             if edit_mode:
                 selected_items = self.tabs[table_name]['tree'].selection()
                 if not selected_items:
@@ -412,13 +458,13 @@ class DebtManagerApp(tk.Tk):
                 selected_item_id = selected_items[0]
                 # Get values from the Treeview item
                 values = self.tabs[table_name]['tree'].item(selected_item_id, 'values')
-                # Map values back to column names including the primary key
-                pk_col = self.tabs[table_name]['primary_key']
-                display_cols = [field['name'] for field in TABLE_SCHEMAS[table_name]['gui_fields']]
-                all_cols_ordered = [pk_col] + display_cols
 
-                # Create a dictionary from the values
-                for i, col_name in enumerate(all_cols_ordered):
+                # Map values back to column names including the primary key
+                display_cols = [field['name'] for field in TABLE_SCHEMAS[table_name]['gui_fields']]
+                all_cols_ordered_in_treeview = [pk_col_name_from_schema] + display_cols
+
+                # Create a dictionary from the values, using the order they appear in the treeview
+                for i, col_name in enumerate(all_cols_ordered_in_treeview):
                     current_record_data[col_name] = values[i]
 
                 logging.debug(f"Form: Editing record: {current_record_data}")
@@ -426,7 +472,7 @@ class DebtManagerApp(tk.Tk):
 
             row_num = 0
             for field_info in TABLE_SCHEMAS[table_name]['gui_fields']:
-                field_name = field_info['name']
+                field_name = field_info['name'] # This is the GUI display name
                 field_type = field_info['type']
 
                 ttk.Label(form_window, text=f"{field_name}:").grid(row=row_num, column=0, padx=5, pady=5, sticky='w')
@@ -445,12 +491,18 @@ class DebtManagerApp(tk.Tk):
                     entries[field_name] = combo
 
                     combo_options = []
+                    # Keep track of value to display map to properly pre-fill combo
+                    value_to_display_map = {}
+
                     if field_info.get('allow_none', False):
                         combo_options.append("None") # Option for no selection
+                        value_to_display_map[None] = "None"
 
-                    if 'options' in field_info:
+                    if 'options' in field_info: # For hardcoded options (e.g., Status)
                         combo_options.extend(field_info['options'])
-                    elif 'source_table' in field_info:
+                        for opt in field_info['options']:
+                            value_to_display_map[opt] = opt # For simple options, value and display are the same
+                    elif 'source_table' in field_info: # For options from other tables (foreign keys)
                         source_tables = field_info['source_table']
                         source_display_cols = field_info['source_display_col']
                         source_value_cols = field_info['source_value_col']
@@ -465,23 +517,36 @@ class DebtManagerApp(tk.Tk):
                             try:
                                 df_source = db_manager.get_table_data(src_tbl)
                                 if not df_source.empty:
+                                    display_col = source_display_cols[i]
+                                    value_col = source_value_cols[i]
+
+                                    # Ensure display_col and value_col exist in the source DataFrame
+                                    if display_col not in df_source.columns:
+                                        logging.warning(f"Form: Source display column '{display_col}' not found in {src_tbl}. Skipping options for {field_name}.")
+                                        continue
+                                    if value_col not in df_source.columns:
+                                        logging.warning(f"Form: Source value column '{value_col}' not found in {src_tbl}. Skipping options for {field_name}.")
+                                        continue
+
                                     for idx, row in df_source.iterrows():
-                                        # Safely access columns, provide fallback if column doesn't exist in df_source
-                                        display_col = source_display_cols[i]
-                                        value_col = source_value_cols[i]
+                                        display_val = row[display_col]
+                                        value_val = row[value_col]
 
-                                        display_val = row[display_col] if display_col in row else f"MissingCol({display_col})"
-                                        value_val = row[value_col] if value_col in row else f"MissingCol({value_col})"
+                                        # Format for display: "Name (ID)" or just "Name" if ID is the same as Name
+                                        if value_col == display_col: # e.g. CategoryName in Categories table
+                                            option_text = str(display_val)
+                                            combo_options.append(option_text)
+                                            value_to_display_map[value_val] = option_text
+                                        else: # e.g. Creditor (DebtID)
+                                            option_text = f"{display_val} ({value_val})"
+                                            combo_options.append(option_text)
+                                            value_to_display_map[value_val] = option_text
 
-                                        # Special handling for CategoryName where display and value are the same
-                                        if display_col == value_col:
-                                            combo_options.append(str(display_val))
-                                        else:
-                                            combo_options.append(f"{display_val} ({value_val})")
                             except Exception as e:
                                 logging.error(f"Form: Error loading combo options from {src_tbl} for field {field_name}: {e}", exc_info=True)
                                 # Continue to next source table or field if one fails
                     combo['values'] = combo_options
+                    entries[field_name].value_to_display_map = value_to_display_map # Store map for pre-filling
                     combo.set(combo_options[0] if combo_options else "") # Set default if available
 
                 entries[field_name].grid(row=row_num, column=1, padx=5, pady=5, sticky='ew')
@@ -490,53 +555,67 @@ class DebtManagerApp(tk.Tk):
             # Populate fields if in edit mode
             if edit_mode:
                 for field_info in TABLE_SCHEMAS[table_name]['gui_fields']:
-                    field_name = field_info['name']
-                    # The actual column name in the DB might differ from GUI field name (e.g., 'Category' vs 'CategoryID')
-                    # Need to map GUI field name to actual DB column name for retrieval
-                    db_col_name = None
-                    if field_info['type'] == 'combo' and 'source_value_col' in field_info:
-                        # If it's a combo box with a source table, the DB column is source_value_col
-                        db_col_name = field_info['source_value_col']
-                    else:
-                        # Otherwise, the DB column name is usually the same as the GUI field name
-                        db_col_name = field_name
+                    field_name = field_info['name'] # This is the GUI display name
+                    field_type = field_info['type']
 
-                    if db_col_name and db_col_name in current_record_data:
-                        value = current_record_data[db_col_name]
+                    # The actual DB column name for the value (ID or raw text)
+                    db_value_col_name = field_info.get('source_value_col', field_name)
+                    # The name of the column that might contain the joined display text
+                    db_display_col_name = field_info.get('source_display_col', field_name)
+
+                    # Prioritize finding the explicit display column from get_table_data first
+                    value_to_prefill = None
+                    if db_display_col_name in current_record_data:
+                        value_to_prefill = current_record_data[db_display_col_name]
+                    # If not found, fall back to the actual value column from the DB
+                    elif db_value_col_name in current_record_data:
+                        value_to_prefill = current_record_data[db_value_col_name]
+
+                    if value_to_prefill is not None:
                         if entries[field_name].winfo_class() == 'TCombobox':
                             combo_widget = entries[field_name]
-                            combo_values = combo_widget['values']
-                            found_display_value = False
-
-                            if field_info.get('allow_none') and (value is None or str(value).lower() == 'none' or value == 0): # Handle 0 for nullable IDs
+                            # Try to match the actual DB value to its display string in the combo
+                            if value_to_prefill in combo_widget.value_to_display_map:
+                                combo_widget.set(combo_widget.value_to_display_map[value_to_prefill])
+                            elif field_info.get('allow_none') and (str(value_to_prefill).lower() == 'none' or value_to_prefill == '' or value_to_prefill == 0):
                                 combo_widget.set("None")
-                                found_display_value = True
                             else:
-                                # Try to find the display value from the original value (ID or Name)
-                                for item_str in combo_values:
-                                    # Match by value in parentheses for ID-based combos
-                                    if f"({value})" in item_str and field_info['type'] == 'combo' and 'source_value_col' in field_info and field_info['source_value_col'] != field_info['source_display_col']:
-                                        combo_widget.set(item_str)
-                                        found_display_value = True
-                                        break
-                                    # Direct match for name-based combos (e.g., CategoryName, PaymentMethod)
-                                    elif str(value) == item_str:
-                                        combo_widget.set(item_str)
-                                        found_display_value = True
-                                        break
+                                # Fallback: if value not found in map, try to set raw value
+                                combo_widget.set(str(value_to_prefill))
+                                logging.warning(f"Form: Could not find display mapping for {field_name} (prefill value: {value_to_prefill}). Setting raw value.")
 
-                            if not found_display_value and value is not None:
-                                # Fallback: if value is not found, set the raw value (might not be pretty)
-                                combo_widget.set(str(value))
-                                logging.warning(f"Form: Could not find display value for {field_name} (DB col: {db_col_name}) with value {value}. Setting raw value.")
+                        elif field_type == 'date':
+                            # Format date from DB (which might include time) to YYYY-MM-DD for entry
+                            try:
+                                # Handles 'YYYY-MM-DD HH:MM:SS.f' or 'YYYY-MM-DD'
+                                dt_obj = datetime.strptime(str(value_to_prefill).split(' ')[0], '%Y-%m-%d')
+                                entries[field_name].delete(0, tk.END)
+                                entries[field_name].insert(0, dt_obj.strftime('%Y-%m-%d'))
+                            except ValueError:
+                                entries[field_name].delete(0, tk.END)
+                                entries[field_name].insert(0, str(value_to_prefill)) # Insert as is if format fails
+                                logging.warning(f"Form: Invalid date format for pre-fill: {value_to_prefill}. Inserting as raw string.")
                         else:
                             entries[field_name].delete(0, tk.END)
-                            entries[field_name].insert(0, value)
-                    elif db_col_name not in current_record_data:
-                        logging.warning(f"Form: Column '{db_col_name}' not found in current_record_data for {table_name}. Cannot pre-fill field {field_name}.")
+                            entries[field_name].insert(0, str(value_to_prefill))
+                    else:
+                        logging.warning(f"Form: No data found for field '{field_name}' (DB cols: '{db_display_col_name}', '{db_value_col_name}') in current_record_data for {table_name}. Cannot pre-fill.")
 
 
-            save_button = ttk.Button(form_window, text="Save", command=lambda: self.save_form_data(form_window, table_name, entries, edit_mode, current_record_data.get(pk_col)))
+            # Fix for NameError: pk_col in lambda
+            # Capture pk_col_name_from_schema in the lambda's default arguments
+            # This ensures pk_col_name_from_schema is evaluated at definition time, not execution time.
+            save_button = ttk.Button(
+                form_window,
+                text="Save",
+                command=lambda pk=pk_col_name_from_schema: self.save_form_data(
+                    form_window,
+                    table_name,
+                    entries,
+                    edit_mode,
+                    current_record_data.get(pk) if current_record_data else None
+                )
+            )
             save_button.grid(row=row_num, column=0, columnspan=2, pady=10)
 
             form_window.grab_set() # Make it modal
@@ -558,51 +637,66 @@ class DebtManagerApp(tk.Tk):
                 field_info = next(f for f in TABLE_SCHEMAS[table_name]['gui_fields'] if f['name'] == field_name)
                 field_type = field_info['type']
 
-                # Determine the actual DB column name
-                db_col_name = field_name
-                if field_type == 'combo' and 'source_value_col' in field_info:
-                    db_col_name = field_info['source_value_col']
-                    # Extract the ID from the combo box string (e.g., "Creditor Name (ID)")
-                    if '(' in value and ')' in value:
-                        try:
-                            value = value.split('(')[-1].replace(')', '')
-                            if value.lower() == "none": # Handle explicit "None" selection
-                                value = None
-                            else:
-                                value = int(value) # Convert ID to integer
-                        except ValueError:
-                            messagebox.showerror("Input Error", f"Invalid ID format for {field_name}. Please select a valid item or 'None'.")
-                            logging.warning(f"SaveForm: Invalid ID format for {field_name}: {value}")
-                            return
-                    elif value.lower() == "none":
-                        value = None # Explicitly set to None for 'None' selection
-                    elif 'source_value_col' in field_info and field_info['source_value_col'] == field_info['source_display_col']:
-                        # If display and value are the same (e.g., CategoryName), use value as is
-                        pass
-                    else:
-                        messagebox.showerror("Input Error", f"Invalid selection for {field_name}. Please select from the list.")
-                        logging.warning(f"SaveForm: Invalid selection for {field_name}: {value}")
-                        return
+                # Determine the actual DB column name to save to
+                db_col_name = field_name # Default to GUI field name, used for text/decimal/date
 
-                # Type conversion
-                if value is None or value == '':
+                # If it's a combo, we need to save the source_value_col (ID) to the DB.
+                # The GUI field_name here is just the display name (e.g., 'Category', 'Account').
+                if field_type == 'combo' and 'source_value_col' in field_info:
+                    db_col_name = field_info['source_value_col'] # Use the actual DB column name for the ID
+
+                    # Handle "None" selection or empty string for nullable foreign keys
+                    if value.lower() == "none" or value == "":
+                        value = None
+                    else:
+                        # For comboboxes, extract the value to be saved to the database.
+                        # This could be the ID in parentheses, or the raw string if value_col == display_col.
+                        if '(' in value and ')' in value and field_info['source_value_col'] != field_info['source_display_col']:
+                            # Extract ID from "Name (ID)" format
+                            try:
+                                value = int(value.split('(')[-1].replace(')', ''))
+                            except ValueError:
+                                messagebox.showerror("Input Error", f"Invalid ID format in combo box for {field_name}. Please select a valid item or 'None'.")
+                                logging.warning(f"SaveForm: Invalid ID format for {field_name}: {value}")
+                                return
+                        # If value_col == display_col (e.g., CategoryName for Assets.Category), keep as string
+                        # Or if it's a simple combo (options, not source_table), keep as string
+                        # In these cases, 'value' is already the correct string to save
+                        pass
+
+                # Type conversion based on the column's type in TABLE_SCHEMAS for the *actual DB column*
+                db_schema_col_info = next(c for c in TABLE_SCHEMAS[table_name]['columns'] if c['name'] == db_col_name)
+                db_column_type = db_schema_col_info['type']
+
+                if value is None:
                     data_to_save[db_col_name] = None
-                elif field_type == 'decimal':
+                elif db_column_type == 'REAL':
                     try:
                         data_to_save[db_col_name] = float(value)
                     except ValueError:
-                        messagebox.showerror("Input Error", f"Invalid decimal value for {field_name}.")
-                        logging.warning(f"SaveForm: Invalid decimal value for {field_name}: {value}")
+                        messagebox.showerror("Input Error", f"Invalid numeric value for {field_name}.")
+                        logging.warning(f"SaveForm: Invalid numeric value for {field_name}: {value}")
                         return
-                elif field_type == 'date':
+                elif db_column_type == 'INTEGER':
                     try:
-                        datetime.strptime(value, '%Y-%m-%d') # Validate format
-                        data_to_save[db_col_name] = value # Store as string
+                        data_to_save[db_col_name] = int(value)
                     except ValueError:
-                        messagebox.showerror("Input Error", f"Invalid date format for {field_name}. Use YYYY-MM-DD.")
-                        logging.warning(f"SaveForm: Invalid date format for {field_name}: {value}")
+                        messagebox.showerror("Input Error", f"Invalid integer value for {field_name}.")
+                        logging.warning(f"SaveForm: Invalid integer value for {field_name}: {value}")
                         return
-                else:
+                elif db_column_type == 'TEXT':
+                    # Special validation for date fields
+                    if field_type == 'date':
+                        try:
+                            datetime.strptime(value, '%Y-%m-%d') # Validate format
+                            data_to_save[db_col_name] = value # Store as string YYYY-MM-DD
+                        except ValueError:
+                            messagebox.showerror("Input Error", f"Invalid date format for {field_name}. Use YYYY-MM-DD.")
+                            logging.warning(f"SaveForm: Invalid date format for {field_name}: {value}")
+                            return
+                    else:
+                        data_to_save[db_col_name] = value
+                else: # Fallback for unknown types, just save as is
                     data_to_save[db_col_name] = value
 
             success = False
@@ -610,11 +704,20 @@ class DebtManagerApp(tk.Tk):
                 success = db_manager.update_record(table_name, record_id, data_to_save)
                 action = "updated"
             else:
-                # For new records, handle 'Amount' and 'OriginalAmount' for Debts
-                if table_name == 'Debts' and 'OriginalAmount' not in data_to_save and 'Amount' in data_to_save:
-                    data_to_save['OriginalAmount'] = data_to_save['Amount']
-                if table_name == 'Debts' and 'AmountPaid' not in data_to_save:
-                    data_to_save['AmountPaid'] = 0.0 # Initialize AmountPaid for new debts
+                # For new records, handle 'OriginalAmount' and 'AmountPaid' for Debts
+                # These might not be present in GUI fields but are needed for DB insertion
+                if table_name == 'Debts':
+                    if 'OriginalAmount' not in data_to_save or data_to_save['OriginalAmount'] is None:
+                        data_to_save['OriginalAmount'] = data_to_save.get('Amount', 0.0)
+                    if 'AmountPaid' not in data_to_save or data_to_save['AmountPaid'] is None:
+                        data_to_save['AmountPaid'] = 0.0 # Initialize AmountPaid for new debts
+
+                # For new Accounts, set Balance as InitialBalance if not provided
+                if table_name == 'Accounts':
+                    if 'Balance' not in data_to_save or data_to_save['Balance'] is None:
+                        data_to_save['Balance'] = data_to_save.get('InitialBalance', 0.0)
+                    if 'InitialBalance' not in data_to_save or data_to_save['InitialBalance'] is None:
+                         data_to_save['InitialBalance'] = data_to_save.get('Balance', 0.0)
 
                 success = db_manager.insert_record(table_name, data_to_save)
                 action = "added"
@@ -624,15 +727,13 @@ class DebtManagerApp(tk.Tk):
                 form_window.destroy()
                 self.load_table_data(table_name) # Refresh the table data
                 # Update related data if necessary
-                if table_name == 'Payments' or table_name == 'Revenue':
+                if table_name in ['Payments', 'Revenue', 'Debts', 'Accounts', 'Goals']:
+                    # Re-run all updates to ensure consistency across the board
+                    # This might be overkill but ensures data integrity after any change
                     db_manager.update_debt_amounts_and_payments()
-                    self.load_dashboard_data() # Refresh dashboard for updated totals
-                if table_name == 'Accounts':
                     db_manager.update_account_balances()
-                    self.load_dashboard_data()
-                if table_name == 'Goals':
                     db_manager.update_goal_progress()
-                    self.load_dashboard_data()
+                    self.load_dashboard_data() # Refresh dashboard for updated totals
                 logging.info(f"SaveForm: Record {action} successfully for {table_name}.")
             else:
                 messagebox.showerror("Error", f"Failed to {action} record. Check logs for details.")
@@ -669,13 +770,9 @@ class DebtManagerApp(tk.Tk):
                     messagebox.showinfo("Success", f"{success_count} record(s) deleted successfully.")
                     self.load_table_data(table_name) # Refresh the table data
                     # Update related data if necessary
-                    if table_name == 'Payments' or table_name == 'Revenue':
+                    if table_name in ['Payments', 'Revenue', 'Debts', 'Accounts', 'Goals']:
                         db_manager.update_debt_amounts_and_payments()
-                        self.load_dashboard_data()
-                    if table_name == 'Accounts':
                         db_manager.update_account_balances()
-                        self.load_dashboard_data()
-                    if table_name == 'Goals':
                         db_manager.update_goal_progress()
                         self.load_dashboard_data()
                     logging.info(f"DeleteRecord: {success_count} record(s) deleted successfully from {table_name}.")
@@ -737,7 +834,10 @@ class DebtManagerApp(tk.Tk):
 
             if report_type == 'Debt Summary':
                 df_report = db_manager.get_table_data('Debts')
-                df_report = df_report[[col['name'] for col in TABLE_SCHEMAS['Debts']['columns'] if col['name'] != 'DebtID']] # Exclude ID
+                # Exclude internal IDs from display if they are not part of gui_fields
+                display_cols = [field['name'] for field in TABLE_SCHEMAS['Debts']['gui_fields']]
+                # Ensure the display columns exist in the DataFrame before filtering
+                df_report = df_report[[col for col in display_cols if col in df_report.columns]]
             elif report_type == 'Daily Expenses':
                 try:
                     report_date = datetime.strptime(report_date_str, '%Y-%m-%d').strftime('%Y-%m-%d')
@@ -747,17 +847,22 @@ class DebtManagerApp(tk.Tk):
                     return
                 payments_df = db_manager.get_table_data('Payments')
                 df_report = payments_df[payments_df['PaymentDate'] == report_date]
-                df_report = df_report[[col for col in df_report.columns if col not in ['PaymentID', 'DebtID']]] # Exclude IDs
+                # Exclude internal IDs from display if they are not part of gui_fields
+                display_cols = [field['name'] for field in TABLE_SCHEMAS['Payments']['gui_fields']]
+                df_report = df_report[[col for col in display_cols if col in df_report.columns]]
             elif report_type == 'Snowball Progress':
                 debts_df = db_manager.get_table_data('Debts')
                 df_report = debts_df[
                     (debts_df['Status'] != 'Paid Off') &
                     (debts_df['Status'] != 'Closed')
                 ].sort_values(by='Amount', ascending=True)
+                # Ensure these columns exist
                 df_report = df_report[['Creditor', 'Amount', 'MinimumPayment', 'SnowballPayment', 'Status']]
             elif report_type == 'Account Balances':
                 df_report = db_manager.get_table_data('Accounts')
-                df_report = df_report[[col for col in df_report.columns if col != 'AccountID']] # Exclude ID
+                # Exclude internal IDs from display if they are not part of gui_fields
+                display_cols = [field['name'] for field in TABLE_SCHEMAS['Accounts']['gui_fields']]
+                df_report = df_report[[col for col in display_cols if col in df_report.columns]]
             elif report_type == 'Financial Projection':
                 df_report = db_manager.generate_financial_projection()
 
@@ -785,8 +890,20 @@ class DebtManagerApp(tk.Tk):
         """Handles actions to perform when the application window is closed."""
         logging.info("AppClosing: Handling application closing event.")
         if messagebox.askokcancel("Quit", "Do you want to quit the application?"):
-            logging.info("AppClosing: User confirmed quit. Destroying application.")
-            self.destroy()
+            # Perform final sync to CSV before closing
+            try:
+                logging.info("Application is closing. Performing final sync to CSV...")
+                db_manager.update_debt_amounts_and_payments() # Ensure latest calculated values are saved
+                db_manager.update_account_balances()
+                db_manager.update_goal_progress()
+                # Call the new sqlite_to_csv function
+                sqlite_to_csv()
+                logging.info("Final sync completed. Destroying application window.")
+            except Exception as e:
+                logging.error(f"Error during final sync before closing: {e}", exc_info=True)
+                messagebox.showwarning("Sync Error", f"An error occurred during final data sync to CSV: {e}\nData might not be fully saved. Check DebugLog.txt.")
+            finally:
+                self.destroy()
         else:
             logging.info("AppClosing: User cancelled quit.")
 
@@ -794,11 +911,12 @@ if __name__ == "__main__":
     # Ensure database is initialized before launching the GUI
     try:
         logging.info("Main: Attempting to initialize database before GUI launch.")
-        db_manager.initialize_database()
+        # Call the specific initializer from db_init for comprehensive setup
+        from debt_manager_db_init import initialize_database as db_initializer
+        db_initializer()
         logging.info("Main: Database initialized for GUI launch.")
         app = DebtManagerApp()
         app.mainloop()
     except Exception as e:
         logging.critical(f"Main: CRITICAL ERROR during GUI startup from __main__: {e}", exc_info=True)
         messagebox.showerror("Startup Error", f"Failed to initialize database or launch GUI: {e}\nCheck DebugLog.txt for more details.")
-

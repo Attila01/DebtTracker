@@ -2,7 +2,8 @@
 # Purpose: Handles the initial creation of the SQLite database and its tables,
 #          including inserting predefined categories.
 # Deploy in: C:\DebtTracker
-# Version: 1.4 (2025-07-19) - Re-engineered table creation to dynamically build SQL
+# Version: 1.5 (2025-07-19) - Confirmed dynamic schema generation handles new columns from config.py.
+#          Re-engineered table creation to dynamically build SQL
 #          from TABLE_SCHEMAS['columns'] instead of using a 'create_sql' key.
 #          Incorporated logic to add missing columns to existing tables.
 #          Improved logging for database initialization.
@@ -43,6 +44,7 @@ def initialize_database():
         if os.path.exists(DB_PATH):
             try:
                 conn = sqlite3.connect(DB_PATH)
+                conn.row_factory = sqlite3.Row # Ensure row_factory is set for consistency
                 cursor = conn.cursor()
                 # Attempt a simple query to verify it's a valid SQLite DB
                 cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -54,6 +56,7 @@ def initialize_database():
         else:
             logging.info(f"Database file not found. Attempting to create: {DB_PATH}")
             conn = sqlite3.connect(DB_PATH) # This creates the file
+            conn.row_factory = sqlite3.Row # Ensure row_factory is set for consistency
             logging.info(f"Database file created successfully: {DB_PATH}")
 
         if conn is None: # Should not happen if previous steps are successful
@@ -126,13 +129,12 @@ def initialize_database():
         cursor.execute("SELECT COUNT(*) FROM Categories")
         if cursor.fetchone()[0] == 0:
             logging.info("Categories table is empty. Inserting predefined categories.")
-            for category_dict in PREDEFINED_CATEGORIES: # PREDEFINED_CATEGORIES is a list of dicts
+            for category_name in PREDEFINED_CATEGORIES: # PREDEFINED_CATEGORIES is a list of strings
                 try:
-                    # Assuming category_dict has 'CategoryName' key
-                    cursor.execute("INSERT INTO Categories (CategoryName) VALUES (?)", (category_dict['CategoryName'],))
+                    cursor.execute("INSERT INTO Categories (CategoryName) VALUES (?)", (category_name,))
                     conn.commit()
                 except sqlite3.IntegrityError: # In case of unique constraint violation
-                    logging.warning(f"Category '{category_dict['CategoryName']}' already exists, skipping insertion.")
+                    logging.warning(f"Category '{category_name}' already exists, skipping insertion.")
             logging.info("Predefined categories inserted successfully.")
         else:
             logging.info("Categories table already contains data. Skipping predefined category insertion.")
@@ -157,4 +159,3 @@ if __name__ == "__main__":
         print("Database initialization script finished. Check DebugLog.txt for details.")
     except Exception as e:
         print(f"Database initialization failed: {e}. See DebugLog.txt for critical errors.")
-

@@ -1,32 +1,32 @@
 # debt_manager_orchestrator.py
 # Purpose: Orchestrates the Debt Management System startup.
 #          1. Initializes the SQLite database.
-#          2. Creates/updates the Excel dashboard template.
-#          3. Performs initial data synchronization from SQLite to Excel.
-#          4. Launches the main Python GUI script.
+#          2. Performs initial data synchronization from SQLite to CSV files.
+#          3. Launches the main Python GUI script.
 # Deploy in: C:\DebtTracker
-# Version: 1.1 (2025-07-19) - Updated to launch debt_manager_gui.py instead of DebtManagerUI.ps1.
+# Version: 1.6 (2025-07-19) - Critical fix for WinError 87 during GUI launch.
+#                            Uses a more compatible subprocess.Popen call for Windows Store Python.
 
 import os
 import subprocess
 import logging
-import time # For potential delays
+import time
+import sys
 
-# Define paths to other scripts and the Excel file
-# Assuming all scripts are in C:\DebtTracker
+# Define paths to other scripts and the CSV directory
 BASE_DIR = 'C:\\DebtTracker'
 DB_INIT_SCRIPT = os.path.join(BASE_DIR, 'debt_manager_db_init.py')
-EXCEL_TEMPLATE_SCRIPT = os.path.join(BASE_DIR, 'debt_manager_excel_template.py')
-EXCEL_SYNC_SCRIPT = os.path.join(BASE_DIR, 'debt_manager_excel_sync.py')
-# Updated UI script path to the new Python GUI
+CSV_SYNC_SCRIPT = os.path.join(BASE_DIR, 'debt_manager_csv_sync.py')
 UI_SCRIPT = os.path.join(BASE_DIR, 'debt_manager_gui.py')
 LOG_DIR = os.path.join(BASE_DIR, 'Logs')
 LOG_FILE = os.path.join(LOG_DIR, 'OrchestratorLog.txt')
 
-# Ensure log directory exists
+# --- Determine the correct Python executable path ---
+# sys.executable gives the absolute path to the Python interpreter
+PYTHON_EXECUTABLE = sys.executable
+
 os.makedirs(LOG_DIR, exist_ok=True)
 
-# Configure logging
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s: %(message)s',
                     handlers=[
@@ -42,9 +42,7 @@ def run_python_script(script_path, script_name):
         raise FileNotFoundError(f"{script_name} not found.")
 
     try:
-        # Use sys.executable to ensure the correct Python interpreter is used
-        # For a simple script, 'python' usually works if it's in PATH
-        result = subprocess.run(['python', script_path], check=True, capture_output=True, text=True)
+        result = subprocess.run([PYTHON_EXECUTABLE, script_path], check=True, capture_output=True, text=True)
         logging.info(f"{script_name} stdout:\n{result.stdout}")
         if result.stderr:
             logging.warning(f"{script_name} stderr:\n{result.stderr}")
@@ -58,8 +56,8 @@ def run_python_script(script_path, script_name):
 
 def run_python_gui_script(script_path, script_name):
     """
-    Helper function to run a Python GUI script.
-    Temporarily uses subprocess.run to capture stderr for debugging.
+    Helper function to launch a Python GUI script in a non-blocking way.
+    This version uses a highly compatible method for Windows Store Python distributions.
     """
     logging.info(f"Launching Python GUI script: {script_name} from {script_path}")
     if not os.path.exists(script_path):
@@ -67,22 +65,16 @@ def run_python_gui_script(script_path, script_name):
         raise FileNotFoundError(f"{script_name} not found.")
 
     try:
-        # TEMPORARY CHANGE FOR DEBUGGING: Use subprocess.run to capture output
-        # This will block the orchestrator until the GUI script exits.
-        # We are using 'python.exe' to ensure any console output is visible.
-        result = subprocess.run(['python.exe', script_path], check=True, capture_output=True, text=True)
-        logging.info(f"{script_name} stdout:\n{result.stdout}")
-        if result.stderr:
-            logging.error(f"{script_name} stderr (GUI script error):\n{result.stderr}")
-            print(f"GUI Error: Check OrchestratorLog.txt for details. Stderr:\n{result.stderr}") # Print to console for immediate feedback
-        logging.info(f"{script_name} completed (or exited).")
-    except subprocess.CalledProcessError as e:
-        logging.critical(f"GUI script {script_name} crashed (Exit Code: {e.returncode}): {e.stderr}", exc_info=True)
-        print(f"CRITICAL GUI ERROR: {script_name} crashed. Check OrchestratorLog.txt for details. Stderr:\n{e.stderr}")
-        raise
+        # Use a simple Popen call without complex creationflags or shell=True initially.
+        # This is often the most compatible for Windows Store Python.
+        # It might open a console window for the GUI, but it should launch reliably.
+        subprocess.Popen([PYTHON_EXECUTABLE, script_path])
+
+        logging.info(f"{script_name} launched (potentially with a new console window).")
+        time.sleep(0.5) # Give it a moment to start
+
     except Exception as e:
-        logging.critical(f"Unexpected error launching GUI script {script_name}: {e}", exc_info=True)
-        print(f"CRITICAL GUI LAUNCH ERROR: Check OrchestratorLog.txt for details. Error: {e}")
+        logging.critical(f"CRITICAL ERROR: Failed to launch GUI script {script_name}: {e}", exc_info=True)
         raise
 
 def main():
@@ -95,22 +87,15 @@ def main():
         run_python_script(DB_INIT_SCRIPT, 'debt_manager_db_init.py')
         logging.info("Step 1: Database initialized successfully.")
 
-        # Step 2: Create/Update Excel Template
-        logging.info("Step 2: Creating/updating Excel template...")
-        run_python_script(EXCEL_TEMPLATE_SCRIPT, 'debt_manager_excel_template.py')
-        logging.info("Step 2: Excel template created/updated successfully.")
+        # Step 2: Perform Initial SQLite to CSV Sync
+        logging.info("Step 2: Performing initial SQLite to CSV sync...")
+        run_python_script(CSV_SYNC_SCRIPT, 'debt_manager_csv_sync.py')
+        logging.info("Step 2: Initial SQLite to CSV sync completed successfully.")
 
-        # Step 3: Perform Initial SQLite to Excel Sync
-        logging.info("Step 3: Performing initial SQLite to Excel sync...")
-        # We call the sqlite_to_excel function directly from the script
-        # by running the script itself, as it has the main execution block.
-        run_python_script(EXCEL_SYNC_SCRIPT, 'debt_manager_excel_sync.py')
-        logging.info("Step 3: Initial SQLite to Excel sync completed successfully.")
-
-        # Step 4: Launch Main UI Script (Python GUI)
-        logging.info("Step 4: Launching Debt Management System GUI...")
+        # Step 3: Launch Main UI Script (Python GUI)
+        logging.info("Step 3: Launching Debt Management System GUI...")
         run_python_gui_script(UI_SCRIPT, 'debt_manager_gui.py')
-        logging.info("Step 4: Debt Management System GUI launched successfully.")
+        logging.info("Step 3: Debt Management System GUI launched successfully.")
 
     except FileNotFoundError as e:
         logging.critical(f"Orchestration failed: {e}. Please ensure all necessary scripts are in {BASE_DIR}.")

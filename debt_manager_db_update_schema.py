@@ -2,7 +2,7 @@
 # Purpose: Updates the SQLite database schema based on definitions in config.py.
 #          This script can create new tables and add missing columns to existing tables.
 # Deploy in: C:\DebtTracker
-# Version: 1.0 (2025-07-18) - Initial creation.
+# Version: 1.1 (2025-07-19) - Fixed KeyError: 'db_columns' by referencing 'columns' from TABLE_SCHEMAS.
 
 import sqlite3
 import os
@@ -65,8 +65,9 @@ def update_database_schema():
 
         # Iterate through all defined tables and create them if missing, or update if existing
         for table_name, schema_info in TABLE_SCHEMAS.items():
-            db_columns = schema_info['db_columns']
-            primary_key = schema_info['primary_key']
+            # Correctly reference the 'columns' key from schema_info
+            schema_columns_defs = schema_info['columns']
+            primary_key_name = schema_info['primary_key'] # Get primary key name from schema
 
             # Check if table exists
             cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'")
@@ -75,21 +76,26 @@ def update_database_schema():
             if not table_exists:
                 # Construct CREATE TABLE statement
                 columns_ddl = []
-                for col in db_columns:
-                    col_type = "TEXT" # Default to TEXT
-                    if col in ['Amount', 'OriginalAmount', 'AmountPaid', 'MinimumPayment', 'SnowballPayment',
-                               'InterestRate', 'Balance', 'StartingBalance', 'PreviousBalance', 'Value',
-                               'TargetAmount', 'CurrentAmount', 'AllocationPercentage', 'NextProjectedIncome', 'AccountLimit']:
-                        col_type = "REAL"
-                    elif 'Date' in col or 'Received' in col:
-                        col_type = "TEXT" # Store dates as TEXT in YYYY-MM-DD HH:MM:SS format
-                    elif 'ID' in col and col != primary_key: # Foreign keys
-                        col_type = "INTEGER"
+                for col_def in schema_columns_defs:
+                    col_name = col_def['name']
+                    col_type = col_def['type']
+                    col_sql = f"{col_name} {col_type}"
 
-                    if col == primary_key:
-                        columns_ddl.append(f"{col} INTEGER PRIMARY KEY AUTOINCREMENT")
-                    else:
-                        columns_ddl.append(f"{col} {col_type}")
+                    if col_def.get('primary_key'):
+                        col_sql += " PRIMARY KEY"
+                        if col_def.get('autoincrement'):
+                            col_sql += " AUTOINCREMENT"
+                    if not col_def.get('nullable') and not col_def.get('primary_key'):
+                        col_sql += " NOT NULL"
+                    if 'default' in col_def:
+                        default_val = col_def['default']
+                        if isinstance(default_val, str):
+                            col_sql += f" DEFAULT '{default_val}'"
+                        else:
+                            col_sql += f" DEFAULT {default_val}"
+                    if col_def.get('unique'):
+                        col_sql += " UNIQUE"
+                    columns_ddl.append(col_sql)
 
                 create_table_sql = f"CREATE TABLE {table_name} ({', '.join(columns_ddl)})"
                 try:
@@ -105,25 +111,29 @@ def update_database_schema():
                 existing_columns_info = cursor.fetchall()
                 existing_column_names = {col_info[1] for col_info in existing_columns_info}
 
-                for col in db_columns:
-                    if col not in existing_column_names:
-                        col_type = "TEXT" # Default type for new columns
-                        if col in ['Amount', 'OriginalAmount', 'AmountPaid', 'MinimumPayment', 'SnowballPayment',
-                                   'InterestRate', 'Balance', 'StartingBalance', 'PreviousBalance', 'Value',
-                                   'TargetAmount', 'CurrentAmount', 'AllocationPercentage', 'NextProjectedIncome', 'AccountLimit']:
-                            col_type = "REAL"
-                        elif 'Date' in col or 'Received' in col:
-                            col_type = "TEXT"
-                        elif 'ID' in col:
-                            col_type = "INTEGER"
+                for col_def in schema_columns_defs:
+                    col_name = col_def['name']
+                    if col_name not in existing_column_names:
+                        col_type = col_def['type']
+                        add_column_sql = f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_type}"
 
-                        add_column_sql = f"ALTER TABLE {table_name} ADD COLUMN {col} {col_type}"
+                        if not col_def.get('nullable') and not col_def.get('primary_key'):
+                            add_column_sql += " NOT NULL"
+                        if 'default' in col_def:
+                            default_val = col_def['default']
+                            if isinstance(default_val, str):
+                                add_column_sql += f" DEFAULT '{default_val}'"
+                            else:
+                                add_column_sql += f" DEFAULT {default_val}"
+                        if col_def.get('unique'):
+                            add_column_sql += " UNIQUE"
+
                         try:
                             cursor.execute(add_column_sql)
                             conn.commit()
-                            logging.info(f"Added column '{col}' to table '{table_name}'.")
+                            logging.info(f"Added column '{col_name}' to table '{table_name}'.")
                         except sqlite3.Error as e:
-                            logging.error(f"Error adding column '{col}' to table '{table_name}': {e}")
+                            logging.error(f"Error adding column '{col_name}' to table '{table_name}': {e}")
                             # Continue even if one column fails, to try others
 
         logging.info("Database schema update process completed.")

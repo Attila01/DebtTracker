@@ -2,11 +2,9 @@
 # Purpose: Creates or updates the Excel dashboard template (DebtDashboard.xlsx)
 #          with necessary sheets and headers, and adds basic visual elements.
 # Deploy in: C:\DebtTracker
-# Version: 2.0 (2025-07-19) - Re-engineered to use openpyxl exclusively,
-#          removing xlwings dependency. This eliminates COM errors and
-#          improves stability. Visual "buttons" are now created by styling
-#          cells. Removed all pythoncom and xlwings related code.
-#          Ensures all new columns from config.py are added as headers.
+# Version: 2.4 (2025-07-19) - Fixed 'AttributeError: 'list' object has no attribute 'add''
+#          by correctly clearing the worksheet's internal table collection.
+#          Ensures only openpyxl is used for all Excel operations, including button styling.
 
 import os
 import logging
@@ -14,8 +12,9 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
 from openpyxl.styles import Font, Border, Side, Alignment, PatternFill
 from openpyxl.worksheet.table import Table, TableStyleInfo
-from openpyxl.styles.colors import Color # Import Color for custom RGB
-import time # Import time for sleep function (though less critical now)
+from openpyxl.styles.colors import Color
+# No xlwings import here!
+
 from config import EXCEL_PATH, TABLE_SCHEMAS, LOG_FILE, LOG_DIR
 
 # Ensure log directory exists
@@ -33,7 +32,7 @@ if not logging.getLogger().handlers:
 def create_excel_template():
     """
     Creates or updates the DebtDashboard.xlsx Excel file.
-    It now uses openpyxl for all operations, including creating sheets, headers,
+    Uses openpyxl for all operations, including creating sheets, headers,
     and styling cells to visually represent dashboard navigation buttons.
     """
     logging.info("Starting Excel template creation/update process.")
@@ -113,25 +112,36 @@ def create_excel_template():
                 adjusted_width = (max_length + 2) if max_length > 0 else 15
                 ws.column_dimensions[get_column_letter(col_idx)].width = adjusted_width
 
-            # Add a Table object for better data management (optional but good practice)
-            # This makes the data range a formal Excel Table
-            tab_ref = f"A1:{get_column_letter(len(headers))}1" # Only header row initially
-            if ws.max_row > 1: # If there's data, include it
-                tab_ref = f"A1:{get_column_letter(len(headers))}{ws.max_row}"
+            # --- CRITICAL FIX: Clear all existing tables from the worksheet's internal _tables collection ---
+            # This prevents the 'AttributeError: 'list' object has no attribute 'add''
+            # by ensuring _tables is a proper openpyxl collection before adding a new Table object.
+            # We iterate and remove existing tables.
+            if hasattr(ws, '_tables'):
+                # Create a list of table names to remove to avoid modifying while iterating
+                tables_to_remove = [table.name for table in ws._tables]
+                for table_name_to_remove in tables_to_remove:
+                    try:
+                        # openpyxl's remove_table method expects the table name
+                        ws.remove_table(table_name_to_remove)
+                        logging.info(f"Removed old table '{table_name_to_remove}' from sheet '{sheet_name}'.")
+                    except Exception as e:
+                        logging.warning(f"Could not remove table '{table_name_to_remove}' from sheet '{sheet_name}': {e}")
 
-            # Remove existing table if it exists to prevent conflict
-            # openpyxl doesn't have a direct way to remove table by name,
-            # so we'll just try to add and catch if it conflicts.
-            # A more robust solution for openpyxl would be to iterate through ws._tables
-            # and remove if displayName matches, but for simplicity, we'll rely on exception.
+            # Now, add the new Table object
+            table_display_name = f"{sheet_name}Table"
             try:
-                table = Table(displayName=f"{sheet_name}Table", ref=tab_ref)
+                # The table reference should only include the header row at this stage of template creation
+                tab_ref = f"A1:{get_column_letter(len(headers))}1"
+                table = Table(displayName=table_display_name, ref=tab_ref)
                 style = TableStyleInfo(name="TableStyleMedium9", showFirstColumn=False,
                                     showLastColumn=False, showRowStripes=True, showColumnStripes=False)
                 table.tableStyleInfo = style
                 ws.add_table(table)
+                logging.info(f"Added new table '{table_display_name}' to sheet '{sheet_name}'.")
             except Exception as e:
-                logging.warning(f"Could not add table to sheet {sheet_name}: {e}. It might already exist or conflict.")
+                logging.error(f"Error adding table '{table_display_name}' to sheet {sheet_name}: {e}", exc_info=True)
+                raise # Re-raise to ensure the orchestrator knows this step failed.
+
 
         # --- Part 2: Add Visual "Buttons" to Dashboard using openpyxl cell styling ---
         # Define common styles for "buttons"
@@ -203,7 +213,6 @@ def create_excel_template():
         raise # Re-raise to be caught by orchestrator
     finally:
         # No xlwings or COM objects to clean up here, just ensure openpyxl workbook is handled.
-        # openpyxl workbooks don't need explicit close() methods like file handles.
         pass
 
     logging.info("Excel template creation/update process completed.")
@@ -214,4 +223,3 @@ if __name__ == "__main__":
         print(f"Excel template created/updated at: {EXCEL_PATH}. Check DebugLog.txt for details.")
     except Exception as e:
         print(f"Failed to create/update Excel template: {e}. See DebugLog.txt for errors.")
-
