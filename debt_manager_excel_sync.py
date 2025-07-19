@@ -1,246 +1,199 @@
 # debt_manager_excel_sync.py
-# Purpose: Synchronizes data between the SQLite database and the Excel dashboard.
-#          Uses pandas for efficient data transfer and openpyxl for Excel interaction.
+# Purpose: Synchronizes data between the SQLite database (debt_manager.db)
+#          and the Excel dashboard (DebtDashboard.xlsx).
 # Deploy in: C:\DebtTracker
-# Version: 1.1 (2025-07-18) - Initial version for Python-based synchronization.
+# Version: 1.0 (2025-07-19) - Initial version. Uses openpyxl for Excel and
+#          sqlite3 for database operations. Designed to replace PowerShell sync
+#          logic and work seamlessly with the openpyxl-based Excel template.
 
 import os
-import sqlite3
-import pandas as pd
 import logging
-import xlwings as xw # Using xlwings for checking if Excel is open
-from openpyxl import load_workbook, Workbook # Using openpyxl for data read/write to sheets
+import sqlite3
+from openpyxl import load_workbook, Workbook
+from openpyxl.utils import get_column_letter
+import pandas as pd # Using pandas for easier data handling between DB and Excel
+import time # For potential delays if needed for file access
 
-# Import configuration from config.py
-from config import DB_PATH, EXCEL_PATH, LOG_FILE, LOG_DIR, TABLE_SCHEMAS
+from config import DB_PATH, EXCEL_PATH, TABLE_SCHEMAS, LOG_FILE, LOG_DIR
 
 # Ensure log directory exists
 os.makedirs(LOG_DIR, exist_ok=True)
 
-# Configure logging
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s: %(message)s',
-                    handlers=[
-                        logging.FileHandler(LOG_FILE, mode='a'),
-                        logging.StreamHandler()
-                    ])
+# Configure logging (if not already configured by orchestrator)
+if not logging.getLogger().handlers:
+    logging.basicConfig(level=logging.INFO,
+                        format='%(asctime)s: %(message)s',
+                        handlers=[
+                            logging.FileHandler(LOG_FILE, mode='a'),
+                            logging.StreamHandler()
+                        ])
 
-def get_db_connection():
-    """Establishes and returns a SQLite database connection."""
+def sqlite_to_excel():
+    """
+    Synchronizes data from SQLite database tables to corresponding Excel sheets.
+    This function overwrites data in Excel sheets with the latest data from SQLite.
+    """
+    logging.info("Starting sqlite_to_excel sync...")
     conn = None
     try:
         conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row # Allows accessing columns by name
-        return conn
-    except sqlite3.Error as e:
-        logging.error(f"Database connection error: {e}")
-        # Do not show messagebox here, let the caller handle it
-        return None
+        cursor = conn.cursor()
 
-def sync_data(direction):
-    """
-    Synchronizes data between SQLite database and Excel dashboard.
-    Args:
-        direction (str): 'sqlite_to_excel' or 'excel_to_sqlite'.
-    """
-    logging.info(f"Starting {direction} sync...")
+        # Load the Excel workbook
+        # If the workbook doesn't exist or is corrupted, create a new one.
+        if os.path.exists(EXCEL_PATH):
+            try:
+                wb = load_workbook(EXCEL_PATH)
+            except Exception as e:
+                logging.warning(f"Could not load existing Excel workbook with openpyxl: {e}. Creating new one.")
+                wb = Workbook()
+        else:
+            wb = Workbook()
 
-    # Check if Excel is open using xlwings (more reliable than process check)
-    try:
-        app = xw.App(visible=False) # Try to get an app instance
-        if app.books: # If there are any open workbooks
-            # Check if our specific Excel file is open
-            is_our_excel_open = False
-            for book in app.books:
-                if os.path.normpath(book.fullname) == os.path.normpath(EXCEL_PATH):
-                    is_our_excel_open = True
-                    break
+        # Remove default 'Sheet' if it exists in a new workbook
+        if 'Sheet' in wb.sheetnames:
+            wb.remove(wb['Sheet'])
 
-            if is_our_excel_open:
-                logging.warning('Excel file is open, skipping sync to prevent data corruption.')
-                # Messagebox should be handled by the GUI caller, not here.
-                # If run standalone, it will just log.
-                app.quit() # Quit the app instance we created
-                return False
-        app.quit() # Quit the app instance if no workbooks were open or ours wasn't
+        for table_name, schema in TABLE_SCHEMAS.items():
+            sheet_name = table_name # Use table name as sheet name
+
+            # Ensure the sheet exists in the workbook
+            if sheet_name not in wb.sheetnames:
+                ws = wb.create_sheet(sheet_name)
+                logging.warning(f"Sheet '{sheet_name}' not found in Excel, creating it for sync.")
+            else:
+                ws = wb[sheet_name]
+
+            # Fetch data from SQLite
+            cursor.execute(f"SELECT * FROM {table_name}")
+            rows = cursor.fetchall()
+
+            # Get column names from SQLite table schema
+            column_names = [description[0] for description in cursor.description]
+
+            # Clear existing data in the Excel sheet (keep headers if they exist)
+            # Find the last row with data (assuming headers are in row 1)
+            # Iterate from row 2 downwards and clear content
+            for row_idx in range(ws.max_row, 1, -1):
+                ws.delete_rows(row_idx)
+
+            # Write headers to the first row if not present or if they need updating
+            excel_headers = schema['excel_columns']
+            for col_idx, header in enumerate(excel_headers, 1):
+                ws.cell(row=1, column=col_idx, value=header)
+
+            # Write data rows
+            for row_data in rows:
+                # Map SQLite row data to Excel columns based on schema['excel_columns']
+                # This ensures the order and inclusion of columns matches the Excel template
+                mapped_row = []
+                for col_name in excel_headers:
+                    try:
+                        # Find the index of the column name in SQLite's fetched column_names
+                        col_index_in_sqlite = column_names.index(col_name)
+                        mapped_row.append(row_data[col_index_in_sqlite])
+                    except ValueError:
+                        # If a column exists in excel_columns but not in SQLite, append None
+                        mapped_row.append(None)
+                ws.append(mapped_row)
+
+            # Auto-adjust column widths based on content
+            for col_idx, header_text in enumerate(excel_headers, 1):
+                max_length = len(header_text)
+                # Iterate through data rows to find max length
+                for row_data in ws.iter_rows(min_row=2, min_col=col_idx, max_col=col_idx):
+                    for cell in row_data:
+                        if cell.value is not None:
+                            cell_length = len(str(cell.value))
+                            if cell_length > max_length:
+                                max_length = cell_length
+                adjusted_width = (max_length + 2) if max_length > 0 else 15
+                ws.column_dimensions[get_column_letter(col_idx)].width = adjusted_width
+
+            logging.info(f"Synced data from SQLite table '{table_name}' to Excel sheet '{sheet_name}'.")
+
+        wb.save(EXCEL_PATH)
+        logging.info("sqlite_to_excel sync completed successfully.")
+
     except Exception as e:
-        logging.warning(f"Could not check if Excel is open using xlwings: {e}. Proceeding with caution.")
-        # If xlwings fails, we still try to proceed with openpyxl, which might fail if file is locked.
+        logging.error(f"Error during sqlite_to_excel sync: {e}", exc_info=True)
+        raise # Re-raise to be caught by orchestrator
+    finally:
+        if conn:
+            conn.close()
+            logging.info("SQLite connection closed after sync.")
 
-    if not os.path.exists(EXCEL_PATH):
-        logging.error(f"Excel file not found: {EXCEL_PATH}. Cannot perform sync.")
-        return False
-
+def excel_to_sqlite():
+    """
+    Synchronizes data from Excel sheets to corresponding SQLite database tables.
+    This function overwrites data in SQLite tables with the latest data from Excel.
+    """
+    logging.info("Starting excel_to_sqlite sync...")
     conn = None
     try:
-        conn = get_db_connection()
-        if conn is None:
-            return False
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
 
-        # Load all data from SQLite into DataFrames
-        sqlite_dfs = {}
-        for table_name in TABLE_SCHEMAS.keys():
-            try:
-                # Use a direct SQL query to load, ensuring all columns are fetched
-                # This handles cases where schema might have evolved in DB but not yet in code
-                df = pd.read_sql_query(f"SELECT * FROM {table_name}", conn)
-                # Ensure numeric columns are properly typed. This is crucial as SQLite is typeless.
-                numeric_cols = [
-                    'Amount', 'OriginalAmount', 'AmountPaid', 'MinimumPayment', 'SnowballPayment',
-                    'InterestRate', 'Balance', 'StartingBalance', 'PreviousBalance', 'Value', 'TargetAmount',
-                    'CurrentAmount', 'AllocationPercentage', 'NextProjectedIncome', 'AccountLimit'
-                ]
-                for col in numeric_cols:
-                    if col in df.columns:
-                        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
+        if not os.path.exists(EXCEL_PATH):
+            logging.warning(f"Excel file not found at {EXCEL_PATH}. Skipping excel_to_sqlite sync.")
+            return
 
-                # Explicitly convert ID columns to integer, filling NaNs with 0
-                id_cols = ['DebtID', 'AccountID', 'PaymentID', 'GoalID', 'AssetID', 'RevenueID', 'CategoryID', 'AllocatedTo']
-                for col in id_cols:
-                    if col in df.columns:
-                        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
+        wb = load_workbook(EXCEL_PATH)
 
-                sqlite_dfs[table_name] = df
-            except pd.io.sql.DatabaseError as e:
-                logging.warning(f"Table '{table_name}' not found in SQLite or other DB error: {e}. Skipping load from SQLite.")
-                sqlite_dfs[table_name] = pd.DataFrame(columns=TABLE_SCHEMAS[table_name]['db_columns']) # Provide empty DF
+        for table_name, schema in TABLE_SCHEMAS.items():
+            sheet_name = table_name
+            if sheet_name not in wb.sheetnames:
+                logging.warning(f"Excel sheet '{sheet_name}' not found. Skipping sync for this table.")
+                continue
 
-        # Load all data from Excel into DataFrames
-        excel_dfs = {}
-        try:
-            excel_workbook = load_workbook(EXCEL_PATH)
-            for table_name in TABLE_SCHEMAS.keys():
-                if table_name not in excel_workbook.sheetnames:
-                    logging.warning(f"Sheet '{table_name}' not found in Excel. Skipping load from Excel.")
-                    excel_dfs[table_name] = pd.DataFrame(columns=TABLE_SCHEMAS[table_name]['excel_columns'])
-                    continue
+            ws = wb[sheet_name]
 
-                sheet = excel_workbook[table_name]
-                # Read data starting from the second row (skipping headers)
-                data = sheet.values
-                # Get headers from the first row
-                excel_headers = [cell.value for cell in sheet[1]]
+            # Read data from Excel, assuming first row is headers
+            data = ws.values
+            columns = next(data) # Get headers from the first row
+            df = pd.DataFrame(data, columns=columns)
 
-                # Create DataFrame, skipping the header row from data
-                df = pd.DataFrame(data=list(data)[1:], columns=excel_headers)
-                excel_dfs[table_name] = df
-        except Exception as e:
-            logging.error(f"Error loading data from Excel: {e}")
-            return False
+            # Ensure column names match SQLite table schema (case-insensitive if needed, but strict here)
+            # Filter DataFrame to only include columns relevant to the SQLite table
+            sqlite_columns_expected = [col['name'] for col in schema['columns']]
 
-        if direction == 'sqlite_to_excel':
-            for table_name, df_sqlite in sqlite_dfs.items():
-                if table_name not in excel_workbook.sheetnames:
-                    logging.warning(f"Sheet '{table_name}' not found in Excel for write. Skipping {table_name} sync.")
-                    continue
+            # Delete existing data in SQLite table
+            cursor.execute(f"DELETE FROM {table_name}")
 
-                sheet = excel_workbook[table_name]
-                # Clear existing data, but keep headers (first row)
-                if sheet.max_row > 1:
-                    sheet.delete_rows(2, sheet.max_row)
+            # Insert data from DataFrame into SQLite
+            # Filter df to only include columns that exist in the SQLite table schema
+            df_filtered = df[[col for col in sqlite_columns_expected if col in df.columns]]
 
-                # Prepare data for writing to Excel, ensuring column order matches Excel headers
-                excel_columns_for_table = TABLE_SCHEMAS[table_name]['excel_columns']
-                # Special handling for Debts to include 'Projected Payment' in Excel
-                if table_name == 'Debts' and 'Projected Payment' not in excel_columns_for_table:
-                    excel_columns_for_table = excel_columns_for_table + ['Projected Payment']
-                    # Calculate Projected Payment if not already in df_sqlite (for display only)
-                    if 'ProjectedPayment' not in df_sqlite.columns:
-                        df_sqlite['ProjectedPayment'] = df_sqlite['MinimumPayment'] + df_sqlite['SnowballPayment']
+            # Prepare for insertion: create placeholders and column names string
+            cols = ", ".join(df_filtered.columns)
+            placeholders = ", ".join(["?" for _ in df_filtered.columns])
 
-                # Map DB column names to Excel column names for writing
-                db_to_excel_map = {db_col: excel_col for db_col, excel_col in zip(TABLE_SCHEMAS[table_name]['db_columns'], TABLE_SCHEMAS[table_name]['excel_columns'])}
+            # Convert DataFrame rows to a list of tuples for executemany
+            data_to_insert = [tuple(row) for row in df_filtered.values]
 
-                # Create a DataFrame with Excel column names and order
-                df_to_write = pd.DataFrame()
-                for db_col, excel_col in db_to_excel_map.items():
-                    if db_col in df_sqlite.columns:
-                        df_to_write[excel_col] = df_sqlite[db_col]
-
-                # Add 'Projected Payment' if it's a Debts table and was calculated
-                if table_name == 'Debts' and 'Projected Payment' in excel_columns_for_table and 'ProjectedPayment' in df_sqlite.columns:
-                    df_to_write['Projected Payment'] = df_sqlite['ProjectedPayment'].apply(lambda x: f"${x:,.2f}") # Format for Excel display
-
-                # Ensure all expected Excel columns are present, even if empty in DB
-                for col_name in excel_columns_for_table:
-                    if col_name not in df_to_write.columns:
-                        df_to_write[col_name] = None # Add missing columns
-
-                # Reorder columns to match Excel headers
-                df_to_write = df_to_write[excel_columns_for_table]
-
-                # Append data to sheet (starting from row 2)
-                for r_idx, row in df_to_write.iterrows():
-                    sheet.append(list(row.values))
-                logging.info(f"Synced data from SQLite table '{table_name}' to Excel sheet '{table_name}'.")
-
-            excel_workbook.save(EXCEL_PATH)
-            logging.info(f"sqlite_to_excel sync completed successfully.")
-
-        elif direction == 'excel_to_sqlite':
-            for table_name, df_excel in excel_dfs.items():
-                if table_name not in TABLE_SCHEMAS:
-                    logging.warning(f"Table '{table_name}' from Excel not defined in schema. Skipping sync to SQLite.")
-                    continue
-
-                # Prepare DataFrame for writing to SQLite, ensuring column order matches DB schema
-                db_columns_for_table = TABLE_SCHEMAS[table_name]['db_columns']
-                excel_columns_for_table = TABLE_SCHEMAS[table_name]['excel_columns']
-
-                # Create a mapping from Excel column names to DB column names
-                excel_to_db_map = {excel_col: db_col for db_col, excel_col in zip(db_columns_for_table, excel_columns_for_table)}
-
-                df_to_write = pd.DataFrame()
-                for excel_col, db_col in excel_to_db_map.items():
-                    if excel_col in df_excel.columns:
-                        # Clean up Excel-specific formatting (e.g., '$', '%') before saving to DB
-                        if df_excel[excel_col].dtype == 'object': # If it's a string
-                            if 'Amount' in db_col or 'Payment' in db_col or 'Balance' in db_col or 'Value' in db_col or 'Income' in db_col or 'Limit' in db_col:
-                                df_to_write[db_col] = df_excel[excel_col].astype(str).str.replace(r'[$,]', '', regex=True).astype(float)
-                            elif 'InterestRate' in db_col:
-                                df_to_write[db_col] = df_excel[excel_col].astype(str).str.replace(r'%', '', regex=True).astype(float)
-                            elif 'Date' in db_col or 'Received' in db_col:
-                                # Attempt to parse date strings into datetime objects, then format for SQLite
-                                df_to_write[db_col] = pd.to_datetime(df_excel[excel_col], errors='coerce').dt.strftime('%Y-%m-%d %H:%M:%S')
-                            else:
-                                df_to_write[db_col] = df_excel[excel_col]
-                        else:
-                            df_to_write[db_col] = df_excel[excel_col]
-                    else:
-                        df_to_write[db_col] = None # Add missing columns as None
-
-                # Ensure all expected DB columns are present and in the correct order
-                df_to_write = df_to_write[db_columns_for_table]
-
-                # Write to SQLite
-                conn.execute(f"DELETE FROM {table_name}") # Clear existing data
-                df_to_write.to_sql(table_name, conn, if_exists='append', index=False)
-                logging.info(f"Synced data from Excel sheet '{table_name}' to SQLite table '{table_name}'.")
+            if data_to_insert: # Only execute if there's data to insert
+                cursor.executemany(f"INSERT INTO {table_name} ({cols}) VALUES ({placeholders})", data_to_insert)
 
             conn.commit()
-            logging.info(f"excel_to_sqlite sync completed successfully.")
-
-        else:
-            logging.error(f"Invalid sync direction: {direction}")
-            return False
+            logging.info(f"Synced data from Excel sheet '{sheet_name}' to SQLite table '{table_name}'.")
 
     except Exception as e:
-        logging.error(f"Error during {direction} sync: {e}", exc_info=True)
-        return False
+        logging.error(f"Error during excel_to_sqlite sync: {e}", exc_info=True)
+        raise # Re-raise to be caught by orchestrator
     finally:
         if conn:
             conn.close()
             logging.info("SQLite connection closed after sync.")
 
 if __name__ == "__main__":
-    # This block is for testing the script independently.
-    # When run via the GUI or orchestrator, sync_data will be called directly.
-    print("This script is primarily for synchronization logic.")
-    print("To test, ensure DebtManager.db and DebtDashboard.xlsx exist.")
-    print("Example: sync_data('sqlite_to_excel') or sync_data('excel_to_sqlite')")
-    # Example usage (uncomment to test):
-    # try:
-    #     sync_data('sqlite_to_excel')
-    #     print("SQLite to Excel sync attempted.")
-    # except Exception as e:
-    #     print(f"Sync failed: {e}")
+    # Example usage:
+    # You can call these functions based on your orchestration needs.
+    # For instance, if you want to push data from SQLite to Excel on startup:
+    try:
+        sqlite_to_excel()
+        # If you want to also pull data from Excel to SQLite after some user interaction:
+        # excel_to_sqlite()
+        print("Excel-SQLite synchronization script executed. Check DebugLog.txt for details.")
+    except Exception as e:
+        print(f"Failed to execute Excel-SQLite synchronization: {e}. See DebugLog.txt for errors.")
+

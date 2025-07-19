@@ -2,9 +2,10 @@
 # Purpose: Handles the initial creation of the SQLite database and its tables,
 #          including inserting predefined categories.
 # Deploy in: C:\DebtTracker
-# Version: 1.3 (2025-07-18) - Updated table creation SQL to include new columns
-#          (AccountLimit, OriginalAmount, AmountPaid, CategoryID, AccountID, Notes, NextProjectedIncome, NextProjectedIncomeDate)
-#          and improved logging for database initialization.
+# Version: 1.4 (2025-07-19) - Re-engineered table creation to dynamically build SQL
+#          from TABLE_SCHEMAS['columns'] instead of using a 'create_sql' key.
+#          Incorporated logic to add missing columns to existing tables.
+#          Improved logging for database initialization.
 
 import sqlite3
 import os
@@ -28,6 +29,7 @@ def initialize_database():
     Initializes the SQLite database:
     - Creates the database file if it doesn't exist.
     - Creates all necessary tables based on TABLE_SCHEMAS if they don't exist.
+    - Adds any missing columns to existing tables.
     - Inserts predefined categories if the Categories table is empty.
     """
     logging.info("Starting database initialization process.")
@@ -59,47 +61,95 @@ def initialize_database():
 
         cursor = conn.cursor()
 
-        # Create tables based on schema definitions
+        # Create tables and add missing columns based on schema definitions
         for table_name, schema in TABLE_SCHEMAS.items():
+            columns_sql = []
+            for col in schema['columns']:
+                col_def = f"{col['name']} {col['type']}"
+                if col.get('primary_key'):
+                    col_def += ' PRIMARY KEY'
+                    if col.get('autoincrement'):
+                        col_def += ' AUTOINCREMENT'
+                if not col.get('nullable') and not col.get('primary_key'):
+                    col_def += ' NOT NULL'
+                if 'default' in col:
+                    default_val = col['default']
+                    if isinstance(default_val, str):
+                        col_def += f" DEFAULT '{default_val}'"
+                    else:
+                        col_def += f" DEFAULT {default_val}"
+                if col.get('unique'):
+                    col_def += ' UNIQUE'
+                columns_sql.append(col_def)
+
+            create_table_sql = f"CREATE TABLE IF NOT EXISTS {table_name} ({', '.join(columns_sql)});"
+
             try:
-                cursor.execute(schema['create_sql'])
-                logging.info(f"Table '{table_name}' created successfully." if cursor.rowcount == -1 else f"Table '{table_name}' already exists. Skipping creation.")
+                cursor.execute(create_table_sql)
+                conn.commit()
+                logging.info(f"Table '{table_name}' ensured to exist (created if not present).")
+
+                # After creating/ensuring table, check for missing columns and add them
+                cursor.execute(f"PRAGMA table_info({table_name});")
+                existing_columns = [info[1] for info in cursor.fetchall()] # info[1] is column name
+
+                for col in schema['columns']:
+                    if col['name'] not in existing_columns:
+                        col_def = f"{col['name']} {col['type']}"
+                        if not col.get('nullable') and not col.get('primary_key'):
+                            col_def += ' NOT NULL'
+                        if 'default' in col:
+                            default_val = col['default']
+                            if isinstance(default_val, str):
+                                col_def += f" DEFAULT '{default_val}'"
+                            else:
+                                col_def += f" DEFAULT {default_val}"
+                        if col.get('unique'):
+                            col_def += ' UNIQUE'
+
+                        try:
+                            cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {col_def};")
+                            logging.info(f"Added missing column to {table_name}: {col_def}")
+                            conn.commit()
+                        except sqlite3.Error as e:
+                            logging.warning(f"Could not add column {col['name']} to {table_name}: {e}")
+
             except sqlite3.OperationalError as e:
-                logging.error(f"Error creating table {table_name}: {e}")
-                # This might happen if a column definition is wrong. Log and continue for other tables.
+                logging.error(f"Error creating/updating table {table_name}: {e}")
+                raise # Re-raise if table creation itself fails
             except Exception as e:
-                logging.critical(f"CRITICAL ERROR: Failed to create table {table_name}: {e}")
+                logging.critical(f"CRITICAL ERROR: Failed to create/update table {table_name}: {e}")
                 raise # Stop if a critical table cannot be created
 
-        # Insert predefined categories if the Categories table is empty
-        try:
-            cursor.execute("SELECT COUNT(*) FROM Categories")
-            count = cursor.fetchone()[0]
-            if count == 0:
-                logging.info("Categories table is empty. Inserting predefined categories.")
-                for category in PREDEFINED_CATEGORIES:
-                    cursor.execute("INSERT INTO Categories (CategoryName) VALUES (?)", (category['CategoryName'],))
-                conn.commit()
-                logging.info("Predefined categories inserted successfully.")
-            else:
-                logging.info("Categories table already contains data. Skipping predefined category insertion.")
-        except sqlite3.OperationalError as e:
-            logging.warning(f"Could not check/insert predefined categories (Categories table might not exist or be corrupt): {e}")
-        except Exception as e:
-            logging.error(f"Error inserting predefined categories: {e}")
+        # Special handling for Categories table: insert predefined categories if empty
+        # This block should be outside the main table creation loop to ensure Categories table is ready
+        cursor.execute("SELECT COUNT(*) FROM Categories")
+        if cursor.fetchone()[0] == 0:
+            logging.info("Categories table is empty. Inserting predefined categories.")
+            for category_dict in PREDEFINED_CATEGORIES: # PREDEFINED_CATEGORIES is a list of dicts
+                try:
+                    # Assuming category_dict has 'CategoryName' key
+                    cursor.execute("INSERT INTO Categories (CategoryName) VALUES (?)", (category_dict['CategoryName'],))
+                    conn.commit()
+                except sqlite3.IntegrityError: # In case of unique constraint violation
+                    logging.warning(f"Category '{category_dict['CategoryName']}' already exists, skipping insertion.")
+            logging.info("Predefined categories inserted successfully.")
+        else:
+            logging.info("Categories table already contains data. Skipping predefined category insertion.")
 
-        conn.commit()
+        conn.commit() # Final commit for any pending changes
         logging.info("Database initialization process completed.")
 
     except sqlite3.Error as e:
-        logging.critical(f"Overall Database initialization failed: {e}")
+        logging.critical(f"Overall Database initialization failed: {e}", exc_info=True)
         raise # Re-raise the exception to be caught by the orchestrator/GUI
     except Exception as e:
-        logging.critical(f"An unexpected error occurred during database initialization: {e}")
+        logging.critical(f"An unexpected error occurred during database initialization: {e}", exc_info=True)
         raise # Re-raise the exception
     finally:
         if conn:
             conn.close()
+            logging.info("Database connection closed after initialization.")
 
 if __name__ == "__main__":
     try:

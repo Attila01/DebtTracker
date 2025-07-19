@@ -1,276 +1,200 @@
 # config.py
-# Purpose: Stores configuration settings and database schema definitions for the Debt Management System.
+# Purpose: Centralized configuration for the Debt Management System.
+#          Defines paths, database schemas, and Excel column mappings.
 # Deploy in: C:\DebtTracker
-# Version: 1.5 (2025-07-18) - Updated with complete schemas, new columns (AccountLimit, OriginalAmount, AmountPaid, CategoryID, AccountID, Notes, NextProjectedIncome, NextProjectedIncomeDate).
-#          Added fields_for_new for form generation.
+# Version: 1.2 (2025-07-19) - Added detailed field definitions for GUI generation,
+#                            including 'type' and 'options' for combo boxes.
+#                            Updated Excel column names to match database fields where applicable.
 
 import os
-from datetime import datetime
 
-# --- Paths Configuration ---
-BASE_DIR = "C:\\DebtTracker" # Base directory for the application
-DB_DIR = os.path.join(BASE_DIR, "db")
-REPORTS_DIR = os.path.join(BASE_DIR, "reports")
-LOGS_DIR = os.path.join(BASE_DIR, "logs")
+# Base directory for the application
+BASE_DIR = 'C:\\DebtTracker'
 
-DB_PATH = os.path.join(DB_DIR, "debt_manager.db")
-EXCEL_PATH = os.path.join(BASE_DIR, "DebtDashboard.xlsx")
-REPORT_PATH = REPORTS_DIR
-LOG_FILE = os.path.join(LOGS_DIR, "DebugLog.txt")
-LOG_DIR = LOGS_DIR # Used for os.makedirs in orchestrator and gui
+# Database configuration
+DB_DIR = os.path.join(BASE_DIR, 'db')
+DB_PATH = os.path.join(DB_DIR, 'debt_manager.db') # Changed from .accdb to .db for SQLite
 
-# --- Database Schema Definitions ---
-# Define table schemas with:
-# 'create_sql': SQL statement to create the table.
-# 'db_columns': List of column names as they appear in the database.
-# 'excel_columns': List of column names as they should appear in Excel headers.
-# 'primary_key': The name of the primary key column.
-# 'fields_for_new': List of dictionaries defining fields for 'Add New Record' forms.
-#                   'name': Corresponds to 'db_columns' name.
-#                   'label': Display name for the form.
-#                   'type': 'text', 'real' (for numbers), 'date', 'dropdown', 'category_dropdown', 'account_selector', 'debt_account_selector'.
-#                   'options': For 'dropdown' type.
+# Excel configuration
+EXCEL_PATH = os.path.join(BASE_DIR, 'DebtDashboard.xlsx')
 
+# Logging configuration
+LOG_DIR = os.path.join(BASE_DIR, 'Logs')
+LOG_FILE = os.path.join(LOG_DIR, 'DebugLog.txt') # Consolidated log file
+
+# Define table schemas for SQLite and Excel mapping
+# 'columns': SQLite table schema (name, type, primary_key, nullable)
+# 'excel_columns': Order and names of columns as they should appear in Excel
+# 'gui_fields': Details for GUI form generation (name, type, options for comboboxes)
 TABLE_SCHEMAS = {
-    "Debts": {
-        "create_sql": """
-            CREATE TABLE IF NOT EXISTS Debts (
-                DebtID INTEGER PRIMARY KEY AUTOINCREMENT,
-                Creditor TEXT NOT NULL,
-                OriginalAmount REAL DEFAULT 0.0,
-                Amount REAL DEFAULT 0.0,
-                AmountPaid REAL DEFAULT 0.0,
-                MinimumPayment REAL DEFAULT 0.0,
-                SnowballPayment REAL DEFAULT 0.0,
-                InterestRate REAL DEFAULT 0.0,
-                DueDate TEXT,
-                Status TEXT,
-                CategoryID INTEGER,
-                AccountID INTEGER,
-                FOREIGN KEY (CategoryID) REFERENCES Categories(CategoryID),
-                FOREIGN KEY (AccountID) REFERENCES Accounts(AccountID)
-            );
-        """,
-        "db_columns": [
-            "DebtID", "Creditor", "OriginalAmount", "Amount", "AmountPaid",
-            "MinimumPayment", "SnowballPayment", "InterestRate", "DueDate",
-            "Status", "CategoryID", "AccountID"
+    'Debts': {
+        'columns': [
+            {'name': 'DebtID', 'type': 'INTEGER', 'primary_key': True, 'nullable': False, 'autoincrement': True},
+            {'name': 'Creditor', 'type': 'TEXT', 'nullable': False},
+            {'name': 'OriginalAmount', 'type': 'REAL', 'nullable': False}, # Added for tracking original debt
+            {'name': 'Amount', 'type': 'REAL', 'nullable': False},
+            {'name': 'AmountPaid', 'type': 'REAL', 'nullable': True, 'default': 0.0}, # Track total paid
+            {'name': 'MinimumPayment', 'type': 'REAL', 'nullable': True},
+            {'name': 'SnowballPayment', 'type': 'REAL', 'nullable': True},
+            {'name': 'InterestRate', 'type': 'REAL', 'nullable': True},
+            {'name': 'DueDate', 'type': 'TEXT', 'nullable': True}, # Stored as ISO 8601 string 'YYYY-MM-DD'
+            {'name': 'Status', 'type': 'TEXT', 'nullable': True},
+            {'name': 'CategoryID', 'type': 'INTEGER', 'nullable': True}, # Foreign key to Categories
+            {'name': 'AccountID', 'type': 'INTEGER', 'nullable': True} # Foreign key to Accounts (for linked accounts)
         ],
-        "excel_columns": [
-            "Debt ID", "Creditor", "Original Amount", "Current Amount", "Amount Paid",
-            "Minimum Payment", "Snowball Payment", "Interest Rate (%)", "Due Date",
-            "Status", "Category ID", "Account ID"
+        'excel_columns': [
+            'DebtID', 'Creditor', 'OriginalAmount', 'Amount', 'AmountPaid', 'MinimumPayment',
+            'SnowballPayment', 'InterestRate', 'DueDate', 'Status', 'CategoryID', 'AccountID'
         ],
-        "primary_key": "DebtID",
-        "fields_for_new": [
-            {'name': 'Creditor', 'label': 'Creditor', 'type': 'text'},
-            {'name': 'OriginalAmount', 'label': 'Original Amount', 'type': 'real'},
-            {'name': 'MinimumPayment', 'label': 'Minimum Payment', 'type': 'real'},
-            {'name': 'SnowballPayment', 'label': 'Snowball Payment', 'type': 'real'},
-            {'name': 'InterestRate', 'label': 'Interest Rate (%)', 'type': 'real'},
-            {'name': 'DueDate', 'label': 'Due Date', 'type': 'date'},
-            {'name': 'Status', 'label': 'Status', 'type': 'dropdown', 'options': ['Open', 'Paid', 'Paid Off', 'Closed', 'Defaulted']},
-            {'name': 'CategoryID', 'label': 'Category', 'type': 'category_dropdown'}, # Links to Categories table
-            {'name': 'AccountID', 'label': 'Linked Account', 'type': 'account_selector'} # Links to Accounts table
-        ]
+        'gui_fields': [
+            {'name': 'Creditor', 'type': 'text'},
+            {'name': 'OriginalAmount', 'type': 'decimal'},
+            {'name': 'Amount', 'type': 'decimal'},
+            {'name': 'MinimumPayment', 'type': 'decimal'},
+            {'name': 'SnowballPayment', 'type': 'decimal'},
+            {'name': 'InterestRate', 'type': 'decimal'},
+            {'name': 'DueDate', 'type': 'date'},
+            {'name': 'Status', 'type': 'combo', 'options': ['Open', 'Closed', 'Current', 'In Collection', 'Paid Off']},
+            {'name': 'Category', 'type': 'combo', 'source_table': 'Categories', 'source_display_col': 'CategoryName', 'source_value_col': 'CategoryID'},
+            {'name': 'Account', 'type': 'combo', 'source_table': 'Accounts', 'source_display_col': 'AccountName', 'source_value_col': 'AccountID'}
+        ],
+        'primary_key': 'DebtID'
     },
-    "Accounts": {
-        "create_sql": """
-            CREATE TABLE IF NOT EXISTS Accounts (
-                AccountID INTEGER PRIMARY KEY AUTOINCREMENT,
-                AccountName TEXT NOT NULL,
-                AccountType TEXT,
-                StartingBalance REAL DEFAULT 0.0,
-                Balance REAL DEFAULT 0.0,
-                PreviousBalance REAL DEFAULT 0.0,
-                AccountLimit REAL DEFAULT 0.0,
-                Status TEXT
-            );
-        """,
-        "db_columns": [
-            "AccountID", "AccountName", "AccountType", "StartingBalance",
-            "Balance", "PreviousBalance", "AccountLimit", "Status"
+    'Accounts': {
+        'columns': [
+            {'name': 'AccountID', 'type': 'INTEGER', 'primary_key': True, 'nullable': False, 'autoincrement': True},
+            {'name': 'AccountName', 'type': 'TEXT', 'nullable': False},
+            {'name': 'Balance', 'type': 'REAL', 'nullable': False},
+            {'name': 'AccountType', 'type': 'TEXT', 'nullable': True},
+            {'name': 'Status', 'type': 'TEXT', 'nullable': True},
+            {'name': 'AccountLimit', 'type': 'REAL', 'nullable': True, 'default': 0.0} # For credit cards/lines of credit
         ],
-        "excel_columns": [
-            "Account ID", "Account Name", "Account Type", "Starting Balance",
-            "Current Balance", "Previous Balance", "Account Limit", "Status"
+        'excel_columns': [
+            'AccountID', 'AccountName', 'Balance', 'AccountType', 'Status', 'AccountLimit'
         ],
-        "primary_key": "AccountID",
-        "fields_for_new": [
-            {'name': 'AccountName', 'label': 'Account Name', 'type': 'text'},
-            {'name': 'AccountType', 'label': 'Account Type', 'type': 'dropdown', 'options': ['Checking', 'Savings', 'Credit Card', 'Loan', 'Investment', 'Other']},
-            {'name': 'StartingBalance', 'label': 'Starting Balance', 'type': 'real'},
-            {'name': 'AccountLimit', 'label': 'Account Limit (for Credit/Loan)', 'type': 'real'},
-            {'name': 'Status', 'label': 'Status', 'type': 'dropdown', 'options': ['Open', 'Closed', 'Active', 'Inactive']}
-        ]
+        'gui_fields': [
+            {'name': 'AccountName', 'type': 'text'},
+            {'name': 'Balance', 'type': 'decimal'},
+            {'name': 'AccountType', 'type': 'combo', 'options': ['Checking', 'Savings', 'Credit Card', 'Loan', 'Investment']},
+            {'name': 'Status', 'type': 'combo', 'options': ['Open', 'Closed', 'Current', 'Active', 'Inactive']},
+            {'name': 'AccountLimit', 'type': 'decimal'}
+        ],
+        'primary_key': 'AccountID'
     },
-    "Payments": {
-        "create_sql": """
-            CREATE TABLE IF NOT EXISTS Payments (
-                PaymentID INTEGER PRIMARY KEY AUTOINCREMENT,
-                DebtID INTEGER,
-                AccountID INTEGER,
-                Amount REAL NOT NULL,
-                PaymentDate TEXT,
-                PaymentMethod TEXT,
-                Category TEXT,
-                Notes TEXT,
-                FOREIGN KEY (DebtID) REFERENCES Debts(DebtID),
-                FOREIGN KEY (AccountID) REFERENCES Accounts(AccountID)
-            );
-        """,
-        "db_columns": [
-            "PaymentID", "DebtID", "AccountID", "Amount", "PaymentDate",
-            "PaymentMethod", "Category", "Notes"
+    'Payments': {
+        'columns': [
+            {'name': 'PaymentID', 'type': 'INTEGER', 'primary_key': True, 'nullable': False, 'autoincrement': True},
+            {'name': 'DebtID', 'type': 'INTEGER', 'nullable': True}, # Can be null if payment is not for a specific debt (e.g., general expense)
+            {'name': 'Amount', 'type': 'REAL', 'nullable': False},
+            {'name': 'PaymentDate', 'type': 'TEXT', 'nullable': False}, # Stored as ISO 8601 string 'YYYY-MM-DD'
+            {'name': 'PaymentMethod', 'type': 'TEXT', 'nullable': True},
+            {'name': 'Category', 'type': 'TEXT', 'nullable': True}, # Can be a category name from Categories table
+            {'name': 'Notes', 'type': 'TEXT', 'nullable': True} # Added notes field
         ],
-        "excel_columns": [
-            "Payment ID", "Debt ID", "Account ID", "Amount", "Payment Date",
-            "Payment Method", "Category", "Notes"
+        'excel_columns': [
+            'PaymentID', 'DebtID', 'Amount', 'PaymentDate', 'PaymentMethod', 'Category', 'Notes'
         ],
-        "primary_key": "PaymentID",
-        "fields_for_new": [
-            {'name': 'DebtID', 'label': 'Linked Debt', 'type': 'debt_account_selector'}, # Can link to Debt or Account
-            {'name': 'AccountID', 'label': 'Payment From Account', 'type': 'account_selector'}, # Links to Accounts table
-            {'name': 'Amount', 'label': 'Amount', 'type': 'real'},
-            {'name': 'PaymentDate', 'label': 'Payment Date', 'type': 'date'},
-            {'name': 'PaymentMethod', 'label': 'Payment Method', 'type': 'dropdown', 'options': ['Direct Debit', 'Credit Card', 'Bank Transfer', 'Cheque', 'Cash', 'Other']},
-            {'name': 'Category', 'label': 'Category', 'type': 'category_dropdown'}, # Links to Categories table
-            {'name': 'Notes', 'label': 'Notes', 'type': 'text'}
-        ]
+        'gui_fields': [
+            {'name': 'Debt', 'type': 'combo', 'source_table': 'Debts', 'source_display_col': 'Creditor', 'source_value_col': 'DebtID', 'allow_none': True}, # Allow 'None' for non-debt payments
+            {'name': 'Amount', 'type': 'decimal'},
+            {'name': 'PaymentDate', 'type': 'date'},
+            {'name': 'PaymentMethod', 'type': 'text'},
+            {'name': 'Category', 'type': 'combo', 'source_table': 'Categories', 'source_display_col': 'CategoryName', 'source_value_col': 'CategoryName'}, # Store CategoryName directly
+            {'name': 'Notes', 'type': 'text'}
+        ],
+        'primary_key': 'PaymentID'
     },
-    "Goals": {
-        "create_sql": """
-            CREATE TABLE IF NOT EXISTS Goals (
-                GoalID INTEGER PRIMARY KEY AUTOINCREMENT,
-                GoalName TEXT NOT NULL,
-                TargetAmount REAL DEFAULT 0.0,
-                CurrentAmount REAL DEFAULT 0.0,
-                TargetDate TEXT,
-                Status TEXT,
-                Notes TEXT
-            );
-        """,
-        "db_columns": [
-            "GoalID", "GoalName", "TargetAmount", "CurrentAmount",
-            "TargetDate", "Status", "Notes"
+    'Goals': {
+        'columns': [
+            {'name': 'GoalID', 'type': 'INTEGER', 'primary_key': True, 'nullable': False, 'autoincrement': True},
+            {'name': 'GoalName', 'type': 'TEXT', 'nullable': False},
+            {'name': 'TargetAmount', 'type': 'REAL', 'nullable': False},
+            {'name': 'CurrentAmount', 'type': 'REAL', 'nullable': True, 'default': 0.0},
+            {'name': 'TargetDate', 'type': 'TEXT', 'nullable': True}, # Stored as ISO 8601 string 'YYYY-MM-DD'
+            {'name': 'Status', 'type': 'TEXT', 'nullable': True},
+            {'name': 'Notes', 'type': 'TEXT', 'nullable': True}
         ],
-        "excel_columns": [
-            "Goal ID", "Goal Name", "Target Amount", "Current Amount",
-            "Target Date", "Status", "Notes"
+        'excel_columns': [
+            'GoalID', 'GoalName', 'TargetAmount', 'CurrentAmount', 'TargetDate', 'Status', 'Notes'
         ],
-        "primary_key": "GoalID",
-        "fields_for_new": [
-            {'name': 'GoalName', 'label': 'Goal Name', 'type': 'text'},
-            {'name': 'TargetAmount', 'label': 'Target Amount', 'type': 'real'},
-            {'name': 'CurrentAmount', 'label': 'Current Amount', 'type': 'real'},
-            {'name': 'TargetDate', 'label': 'Target Date', 'type': 'date'},
-            {'name': 'Status', 'label': 'Status', 'type': 'dropdown', 'options': ['Planned', 'In Progress', 'Completed', 'On Hold', 'Cancelled']},
-            {'name': 'Notes', 'label': 'Notes', 'type': 'text'}
-        ]
+        'gui_fields': [
+            {'name': 'GoalName', 'type': 'text'},
+            {'name': 'TargetAmount', 'type': 'decimal'},
+            {'name': 'CurrentAmount', 'type': 'decimal'},
+            {'name': 'TargetDate', 'type': 'date'},
+            {'name': 'Status', 'type': 'combo', 'options': ['Planned', 'In Progress', 'Completed', 'On Hold']},
+            {'name': 'Notes', 'type': 'text'}
+        ],
+        'primary_key': 'GoalID'
     },
-    "Assets": {
-        "create_sql": """
-            CREATE TABLE IF NOT EXISTS Assets (
-                AssetID INTEGER PRIMARY KEY AUTOINCREMENT,
-                AssetName TEXT NOT NULL,
-                Value REAL DEFAULT 0.0,
-                Category TEXT,
-                AssetStatus TEXT,
-                PurchaseDate TEXT,
-                Notes TEXT
-            );
-        """,
-        "db_columns": [
-            "AssetID", "AssetName", "Value", "Category", "AssetStatus", "PurchaseDate", "Notes"
+    'Assets': {
+        'columns': [
+            {'name': 'AssetID', 'type': 'INTEGER', 'primary_key': True, 'nullable': False, 'autoincrement': True},
+            {'name': 'AssetName', 'type': 'TEXT', 'nullable': False},
+            {'name': 'Value', 'type': 'REAL', 'nullable': False},
+            {'name': 'Category', 'type': 'TEXT', 'nullable': True}, # Category name from Categories table
+            {'name': 'PurchaseDate', 'type': 'TEXT', 'nullable': True}, # Stored as ISO 8601 string 'YYYY-MM-DD'
+            {'name': 'Status', 'type': 'TEXT', 'nullable': True},
+            {'name': 'Notes', 'type': 'TEXT', 'nullable': True}
         ],
-        "excel_columns": [
-            "Asset ID", "Asset Name", "Value", "Category", "Status", "Purchase Date", "Notes"
+        'excel_columns': [
+            'AssetID', 'AssetName', 'Value', 'Category', 'PurchaseDate', 'Status', 'Notes'
         ],
-        "primary_key": "AssetID",
-        "fields_for_new": [
-            {'name': 'AssetName', 'label': 'Asset Name', 'type': 'text'},
-            {'name': 'Value', 'label': 'Current Value', 'type': 'real'},
-            {'name': 'Category', 'label': 'Category', 'type': 'category_dropdown'},
-            {'name': 'AssetStatus', 'label': 'Status', 'type': 'dropdown', 'options': ['Active', 'Sold', 'Disposed', 'Liquidated']},
-            {'name': 'PurchaseDate', 'label': 'Purchase Date', 'type': 'date'},
-            {'name': 'Notes', 'label': 'Notes', 'type': 'text'}
-        ]
+        'gui_fields': [
+            {'name': 'AssetName', 'type': 'text'},
+            {'name': 'Value', 'type': 'decimal'},
+            {'name': 'Category', 'type': 'combo', 'source_table': 'Categories', 'source_display_col': 'CategoryName', 'source_value_col': 'CategoryName'},
+            {'name': 'PurchaseDate', 'type': 'date'},
+            {'name': 'Status', 'type': 'combo', 'options': ['Active', 'Sold', 'Disposed']},
+            {'name': 'Notes', 'type': 'text'}
+        ],
+        'primary_key': 'AssetID'
     },
-    "Revenue": {
-        "create_sql": """
-            CREATE TABLE IF NOT EXISTS Revenue (
-                RevenueID INTEGER PRIMARY KEY AUTOINCREMENT,
-                Amount REAL NOT NULL,
-                DateReceived TEXT,
-                Source TEXT,
-                AllocatedTo INTEGER,
-                AllocationPercentage REAL DEFAULT 0.0,
-                AllocationType TEXT,
-                NextProjectedIncome REAL DEFAULT 0.0,
-                NextProjectedIncomeDate TEXT
-            );
-        """,
-        "db_columns": [
-            "RevenueID", "Amount", "DateReceived", "Source", "AllocatedTo",
-            "AllocationPercentage", "AllocationType", "NextProjectedIncome", "NextProjectedIncomeDate"
+    'Revenue': {
+        'columns': [
+            {'name': 'RevenueID', 'type': 'INTEGER', 'primary_key': True, 'nullable': False, 'autoincrement': True},
+            {'name': 'Amount', 'type': 'REAL', 'nullable': False},
+            {'name': 'DateReceived', 'type': 'TEXT', 'nullable': False}, # Stored as ISO 8601 string 'YYYY-MM-DD'
+            {'name': 'Source', 'type': 'TEXT', 'nullable': True},
+            {'name': 'AllocatedTo', 'type': 'INTEGER', 'nullable': True}, # Foreign key to AccountID or DebtID
+            {'name': 'AllocationType', 'type': 'TEXT', 'nullable': True}, # 'Account', 'Debt', 'Other'
+            {'name': 'NextProjectedIncome', 'type': 'REAL', 'nullable': True}, # For recurring income tracking
+            {'name': 'NextProjectedIncomeDate', 'type': 'TEXT', 'nullable': True} # Stored as ISO 8601 string 'YYYY-MM-DD'
         ],
-        "excel_columns": [
-            "Revenue ID", "Amount", "Date Received", "Source", "Allocated To ID",
-            "Allocation Percentage", "Allocation Type", "Next Projected Income", "Next Projected Income Date"
+        'excel_columns': [
+            'RevenueID', 'Amount', 'DateReceived', 'Source', 'AllocatedTo', 'AllocationType',
+            'NextProjectedIncome', 'NextProjectedIncomeDate'
         ],
-        "primary_key": "RevenueID",
-        "fields_for_new": [
-            {'name': 'Amount', 'label': 'Amount', 'type': 'real'},
-            {'name': 'DateReceived', 'label': 'Date Received', 'type': 'date'},
-            {'name': 'Source', 'label': 'Source', 'type': 'text'},
-            {'name': 'AllocatedTo', 'label': 'Allocated To (Account/Goal ID)', 'type': 'debt_account_selector'}, # Can be AccountID or GoalID
-            {'name': 'AllocationPercentage', 'label': 'Allocation Percentage (%)', 'type': 'real'},
-            {'name': 'AllocationType', 'label': 'Allocation Type', 'type': 'dropdown', 'options': ['Account', 'Goal', 'Category-Based', 'Unallocated']},
-            {'name': 'NextProjectedIncome', 'label': 'Next Projected Income', 'type': 'real'},
-            {'name': 'NextProjectedIncomeDate', 'label': 'Next Projected Income Date', 'type': 'date'}
-        ]
+        'gui_fields': [
+            {'name': 'Amount', 'type': 'decimal'},
+            {'name': 'DateReceived', 'type': 'date'},
+            {'name': 'Source', 'type': 'text'},
+            {'name': 'AllocatedTo', 'type': 'combo', 'source_table': ['Accounts', 'Debts'], 'source_display_col': ['AccountName', 'Creditor'], 'source_value_col': ['AccountID', 'DebtID'], 'allow_none': True},
+            {'name': 'AllocationType', 'type': 'combo', 'options': ['Account', 'Debt', 'Other']},
+            {'name': 'NextProjectedIncome', 'type': 'decimal'},
+            {'name': 'NextProjectedIncomeDate', 'type': 'date'}
+        ],
+        'primary_key': 'RevenueID'
     },
-    "Categories": {
-        "create_sql": """
-            CREATE TABLE IF NOT EXISTS Categories (
-                CategoryID INTEGER PRIMARY KEY AUTOINCREMENT,
-                CategoryName TEXT NOT NULL UNIQUE
-            );
-        """,
-        "db_columns": [
-            "CategoryID", "CategoryName"
+    'Categories': {
+        'columns': [
+            {'name': 'CategoryID', 'type': 'INTEGER', 'primary_key': True, 'nullable': False, 'autoincrement': True},
+            {'name': 'CategoryName', 'type': 'TEXT', 'nullable': False, 'unique': True}
         ],
-        "excel_columns": [
-            "Category ID", "Category Name"
+        'excel_columns': [
+            'CategoryID', 'CategoryName'
         ],
-        "primary_key": "CategoryID",
-        "fields_for_new": [
-            {'name': 'CategoryName', 'label': 'Category Name', 'type': 'text'}
-        ]
+        'gui_fields': [
+            {'name': 'CategoryName', 'type': 'text'}
+        ],
+        'primary_key': 'CategoryID'
     }
 }
 
-# --- Predefined Categories ---
+# Predefined categories for initial database setup
 PREDEFINED_CATEGORIES = [
-    {"CategoryName": "Housing"},
-    {"CategoryName": "Utilities"},
-    {"CategoryName": "Groceries"},
-    {"CategoryName": "Transportation"},
-    {"CategoryName": "Dining Out"},
-    {"CategoryName": "Entertainment"},
-    {"CategoryName": "Health & Fitness"},
-    {"CategoryName": "Shopping"},
-    {"CategoryName": "Education"},
-    {"CategoryName": "Personal Care"},
-    {"CategoryName": "Miscellaneous"},
-    {"CategoryName": "Income"},
-    {"CategoryName": "Savings"},
-    {"CategoryName": "Investment"},
-    {"CategoryName": "Debt Payment"},
-    {"CategoryName": "Credit Card"}, # For credit card debts
-    {"CategoryName": "Loan"},        # For loan debts
-    {"CategoryName": "Bills"},       # For general bills
-    {"CategoryName": "Collection"},  # For collection accounts
-    {"CategoryName": "Emergency Fund"},
-    {"CategoryName": "Retirement"}
+    "Housing", "Utilities", "Groceries", "Transportation", "Healthcare",
+    "Insurance", "Debt Payment", "Savings", "Investments", "Education",
+    "Entertainment", "Dining Out", "Shopping", "Personal Care", "Gifts/Donations",
+    "Miscellaneous", "Salary", "Freelance Income", "Bonus", "Refund", "Interest Income"
 ]
