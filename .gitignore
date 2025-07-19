@@ -1,13 +1,21 @@
 # Ignore database files
 *.accdb
 *.mdb
-
 # Ignore Excel log files
-logs/
-*.log.xlsx
-*.log.xls
+/logs/
 
 # Ignore temporary or backup files
 ~$*
 *.tmp
 *.bak
+__pycache__/
+*.pyc
+*.log
+*.xlsx
+*.db
+*.accdb
+/Logs/
+/db/
+reports/*.csv
+test/
+
