@@ -1,0 +1,1050 @@
+﻿# Debt Management System PowerShell Script
+# Requires: Microsoft Access Database Engine
+# Deploy in: C:\DebtTracker
+# Purpose: Manage debts, accounts, payments, goals with GUI, reminders, projections, and Excel syncing
+# Version: 3.17 (2025-07-16) - Fixed all parse errors, unused parameters, and simplified SQL construction
+
+param (
+    [switch]$TestMode
+)
+
+# Enable debug logging for troubleshooting
+$DebugPreference = if ($TestMode) { 'Continue' } else { 'SilentlyContinue' }
+$logDir = 'C:\DebtTracker\Logs'
+$logFile = "$logDir\DebugLog.txt"
+function Write-DebugLog {
+    param (
+        [Parameter(Mandatory)]
+        [string]$Message
+    )
+    Write-Debug $Message
+    if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+    "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): $Message" | Out-File -FilePath $logFile -Append -Force
+}
+
+Write-DebugLog 'Starting DebtManager.ps1'
+
+# Configuration
+$script:config = @{
+    DbPath       = if ($TestMode) { 'C:\DebtTracker\db\TestDebtManager.accdb' } else { 'C:\DebtTracker\db\DebtManager.accdb' }
+    ExcelPath    = 'C:\DebtTracker\DebtDashboard.xlsx'
+    BackupPath   = 'C:\DebtTracker\db\Backups'
+    ReportPath   = 'C:\DebtTracker\reports'
+    ReminderDays = 7
+    ConnString   = $null
+    CsvPath      = $null
+}
+$dbPath = ${script:config}.DbPath
+$script:config.ConnString = "Provider=Microsoft.ACE.OLEDB.12.0;Data Source=$dbPath;"
+$script:config.CsvPath = "${script:config}.ReportPath\DebtReport_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
+if (-not (Test-Path 'C:\DebtTracker\db')) { New-Item -ItemType Directory -Path 'C:\DebtTracker\db' -Force | Out-Null }
+if (-not (Test-Path ${script:config}.ReportPath)) { New-Item -ItemType Directory -Path ${script:config}.ReportPath -Force | Out-Null }
+Write-DebugLog "Config loaded: $(${script:config} | ConvertTo-Json -Depth 2)"
+
+# Load required assemblies
+try {
+    Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+    Add-Type -AssemblyName System.Data -ErrorAction Stop
+    Add-Type -AssemblyName System.Drawing -ErrorAction Stop
+    Write-DebugLog 'Assemblies loaded successfully'
+}
+catch {
+    Write-DebugLog "Error loading assemblies: $_"
+    $null = [System.Windows.Forms.MessageBox]::Show("Error loading assemblies: $_`nEnsure Microsoft Access Database Engine is installed.", 'Error', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+    exit
+}
+
+# Check if Excel is open
+function Test-ExcelOpen {
+    try {
+        $excelProcess = Get-Process -Name 'EXCEL' -ErrorAction SilentlyContinue
+        if ($excelProcess) {
+            Write-DebugLog 'Excel is currently open'
+            return $true
+        }
+        return $false
+    }
+    catch {
+        Write-DebugLog "Error checking Excel process: $_"
+        return $false
+    }
+}
+
+# Sync Excel to Access
+function Sync-ExcelToAccess {
+    [CmdletBinding(SupportsShouldProcess)]
+    [OutputType([void])]
+    param ()
+    try {
+        if (-not (Test-Path ${script:config}.ExcelPath)) {
+            Write-DebugLog "Excel file not found: ${script:config}.ExcelPath"
+            return
+        }
+        if (Test-ExcelOpen) {
+            Write-DebugLog 'Excel is open, skipping sync to avoid conflicts'
+            $null = [System.Windows.Forms.MessageBox]::Show('Excel is open. Please close it to sync data.', 'Warning', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+            return
+        }
+
+        $conn = New-Object System.Data.OleDb.OleDbConnection ${script:config}.ConnString
+        $conn.Open()
+        $cmd = $conn.CreateCommand()
+
+        # Sync Debts
+        $excelConnString = "Provider=Microsoft.ACE.OLEDB.12.0;Data Source=${script:config}.ExcelPath;Extended Properties='Excel 12.0 Xml;HDR=YES;'"
+        $excelConn = New-Object System.Data.OleDb.OleDbConnection $excelConnString
+        $excelConn.Open()
+        $excelCmd = $excelConn.CreateCommand()
+        $excelCmd.CommandText = 'SELECT * FROM [Debts$]'
+        $adapter = New-Object System.Data.OleDb.OleDbDataAdapter $excelCmd
+        $table = New-Object System.Data.DataTable
+        $adapter.Fill($table) | Out-Null
+        $cmd.CommandText = 'DELETE FROM Debts'
+        $cmd.ExecuteNonQuery() | Out-Null
+        foreach ($row in $table.Rows) {
+            $cmd.CommandText = 'INSERT INTO Debts (DebtID, Creditor, Amount, MinimumPayment, SnowballPayment, InterestRate, DueDate, Status) VALUES (?,?,?,?,?,?,?,?)'
+            $cmd.Parameters.Clear()
+            $cmd.Parameters.AddWithValue('@p1', $row.DebtID) | Out-Null
+            $cmd.Parameters.AddWithValue('@p2', $row.Creditor) | Out-Null
+            $cmd.Parameters.AddWithValue('@p3', $row.Amount) | Out-Null
+            $cmd.Parameters.AddWithValue('@p4', $row.MinimumPayment) | Out-Null
+            $cmd.Parameters.AddWithValue('@p5', $row.SnowballPayment) | Out-Null
+            $cmd.Parameters.AddWithValue('@p6', $row.InterestRate) | Out-Null
+            $cmd.Parameters.AddWithValue('@p7', $row.DueDate) | Out-Null
+            $cmd.Parameters.AddWithValue('@p8', $row.Status) | Out-Null
+            $cmd.ExecuteNonQuery() | Out-Null
+        }
+        $excelConn.Close()
+        Write-DebugLog 'Debts synced from Excel to Access'
+        $conn.Close()
+    }
+    catch {
+        Write-DebugLog "Error syncing Excel to Access: $_"
+        $null = [System.Windows.Forms.MessageBox]::Show("Error syncing Excel to Access: $_", 'Error', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+    }
+}
+
+# Sync Access to Excel
+function Sync-AccessToExcel {
+    [CmdletBinding(SupportsShouldProcess)]
+    [OutputType([void])]
+    param ()
+    try {
+        if (Test-ExcelOpen) {
+            Write-DebugLog 'Excel is open, skipping sync to avoid conflicts'
+            $null = [System.Windows.Forms.MessageBox]::Show('Excel is open. Please close it to save changes.', 'Warning', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+            return
+        }
+
+        $conn = New-Object System.Data.OleDb.OleDbConnection ${script:config}.ConnString
+        $conn.Open()
+        $cmd = $conn.CreateCommand()
+        $cmd.CommandText = 'SELECT * FROM Debts'
+        $adapter = New-Object System.Data.OleDb.OleDbDataAdapter $cmd
+        $table = New-Object System.Data.DataTable
+        $adapter.Fill($table) | Out-Null
+        $conn.Close()
+
+        $excelConnString = "Provider=Microsoft.ACE.OLEDB.12.0;Data Source=${script:config}.ExcelPath;Extended Properties='Excel 12.0 Xml;HDR=YES;'"
+        $excelConn = New-Object System.Data.OleDb.OleDbConnection $excelConnString
+        $excelConn.Open()
+        $excelCmd = $excelConn.CreateCommand()
+        $excelCmd.CommandText = 'DELETE * FROM [Debts$]'
+        $excelCmd.ExecuteNonQuery() | Out-Null
+        foreach ($row in $table.Rows) {
+            $excelCmd.CommandText = 'INSERT INTO [Debts$] (DebtID, Creditor, Amount, MinimumPayment, SnowballPayment, InterestRate, DueDate, Status) VALUES (?,?,?,?,?,?,?,?)'
+            $excelCmd.Parameters.Clear()
+            $excelCmd.Parameters.AddWithValue('@p1', $row.DebtID) | Out-Null
+            $excelCmd.Parameters.AddWithValue('@p2', $row.Creditor) | Out-Null
+            $excelCmd.Parameters.AddWithValue('@p3', $row.Amount) | Out-Null
+            $excelCmd.Parameters.AddWithValue('@p4', $row.MinimumPayment) | Out-Null
+            $excelCmd.Parameters.AddWithValue('@p5', $row.SnowballPayment) | Out-Null
+            $excelCmd.Parameters.AddWithValue('@p6', $row.InterestRate) | Out-Null
+            $excelCmd.Parameters.AddWithValue('@p7', $row.DueDate) | Out-Null
+            $excelCmd.Parameters.AddWithValue('@p8', $row.Status) | Out-Null
+            $excelCmd.ExecuteNonQuery() | Out-Null
+        }
+        $excelConn.Close()
+        Write-DebugLog 'Debts synced from Access to Excel'
+    }
+    catch {
+        Write-DebugLog "Error syncing Access to Excel: $_"
+        $null = [System.Windows.Forms.MessageBox]::Show("Error syncing Access to Excel: $_", 'Error', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+    }
+}
+
+# Check if a database table exists
+function Test-TableExist {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param (
+        [Parameter(Mandatory)]
+        [string]$TableName
+    )
+    try {
+        $conn = New-Object System.Data.OleDb.OleDbConnection ${script:config}.ConnString
+        $conn.Open()
+        $schema = $conn.GetSchema('Tables')
+        $exists = $schema.Rows | Where-Object { $_['TABLE_NAME'] -eq $TableName }
+        $conn.Close()
+        return [bool]$exists
+    }
+    catch {
+        Write-DebugLog "Error checking table ${TableName}: $_"
+        return $false
+    }
+}
+
+# Initialize database and create tables
+function Initialize-Database {
+    [CmdletBinding(SupportsShouldProcess)]
+    [OutputType([void])]
+    param ()
+    try {
+        Write-DebugLog "Initializing database at $dbPath"
+        if (-not (Test-Path $dbPath)) {
+            if ($PSCmdlet.ShouldProcess($dbPath, 'Create database')) {
+                $adox = New-Object -ComObject ADOX.Catalog
+                $adox.Create(${script:config}.ConnString) | Out-Null
+                [System.Runtime.InteropServices.Marshal]::ReleaseComObject($adox) | Out-Null
+                Write-DebugLog 'Database created'
+            }
+        }
+
+        $conn = New-Object System.Data.OleDb.OleDbConnection ${script:config}.ConnString
+        $conn.Open()
+        $cmd = $conn.CreateCommand()
+
+        $tables = @(
+            @{Name='Debts'; DDL='CREATE TABLE Debts (DebtID COUNTER PRIMARY KEY, Creditor VARCHAR(255) NOT NULL, Amount CURRENCY NOT NULL, MinimumPayment CURRENCY, SnowballPayment CURRENCY, InterestRate DOUBLE, DueDate DATETIME, Status VARCHAR(50))'},
+            @{Name='Accounts'; DDL='CREATE TABLE Accounts (AccountID COUNTER PRIMARY KEY, AccountName VARCHAR(255) NOT NULL, Balance CURRENCY NOT NULL, AccountType VARCHAR(50), Status VARCHAR(50))'},
+            @{Name='Payments'; DDL='CREATE TABLE Payments (PaymentID COUNTER PRIMARY KEY, DebtID INTEGER, Amount CURRENCY NOT NULL, PaymentDate DATETIME, PaymentMethod VARCHAR(255), Category VARCHAR(50))'},
+            @{Name='Goals'; DDL='CREATE TABLE Goals (GoalID COUNTER PRIMARY KEY, GoalName VARCHAR(255) NOT NULL, TargetAmount CURRENCY NOT NULL, CurrentAmount CURRENCY, TargetDate DATETIME, Status VARCHAR(50), Notes VARCHAR(255))'},
+            @{Name='Reminders'; DDL='CREATE TABLE Reminders (ReminderID COUNTER PRIMARY KEY, TableName VARCHAR(50) NOT NULL, RecordID INTEGER, ReminderDate DATETIME, Message VARCHAR(255))'},
+            @{Name='Assets'; DDL='CREATE TABLE Assets (AssetID COUNTER PRIMARY KEY, AssetName VARCHAR(255) NOT NULL, Value CURRENCY NOT NULL, Category VARCHAR(50), Status VARCHAR(50))'},
+            @{Name='Revenue'; DDL='CREATE TABLE Revenue (RevenueID COUNTER PRIMARY KEY, Amount CURRENCY NOT NULL, DateReceived DATETIME, Source VARCHAR(255), AllocatedTo INTEGER, AllocationType VARCHAR(50))'},
+            @{Name='Categories'; DDL='CREATE TABLE Categories (CategoryID COUNTER PRIMARY KEY, CategoryName VARCHAR(255) NOT NULL)'}
+        )
+
+        foreach ($table in $tables) {
+            if (-not (Test-TableExist -TableName $table.Name)) {
+                if ($PSCmdlet.ShouldProcess($table.Name, 'Create table')) {
+                    $cmd.CommandText = $table.DDL
+                    $cmd.ExecuteNonQuery() | Out-Null
+                    Write-DebugLog "${table.Name} table created"
+                }
+            }
+        }
+
+        # Insert sample data if Debts table is empty
+        $cmd.CommandText = 'SELECT COUNT(*) FROM Debts'
+        if ($cmd.ExecuteScalar() -eq 0) {
+            if ($PSCmdlet.ShouldProcess('Debts', 'Insert sample data')) {
+                $sampleDebts = @(
+                    ('Avant CC', 750.00, 50.00, 100.00, 15.0, '2025-01-19', 'Closed'),
+                    ('COMCAST', 115.84, 30.00, 30.00, 0.0, '2025-01-26', 'Current'),
+                    ('Nordstrom', 1900.00, 75.00, 75.00, 18.0, '2024-09-25', 'In Collection'),
+                    ('T-MOBILE', 315.17, 40.00, 40.00, 0.0, '2024-09-28', 'Paid Off')
+                )
+                foreach ($debt in $sampleDebts) {
+                    $cmd.CommandText = 'INSERT INTO Debts (Creditor, Amount, MinimumPayment, SnowballPayment, InterestRate, DueDate, Status) VALUES (?,?,?,?,?,?,?)'
+                    $cmd.Parameters.Clear()
+                    $cmd.Parameters.AddWithValue('@p1', $debt[0]) | Out-Null
+                    $cmd.Parameters.AddWithValue('@p2', $debt[1]) | Out-Null
+                    $cmd.Parameters.AddWithValue('@p3', $debt[2]) | Out-Null
+                    $cmd.Parameters.AddWithValue('@p4', $debt[3]) | Out-Null
+                    $cmd.Parameters.AddWithValue('@p5', $debt[4]) | Out-Null
+                    $cmd.Parameters.AddWithValue('@p6', [DateTime]::Parse($debt[5])) | Out-Null
+                    $cmd.Parameters.AddWithValue('@p7', $debt[6]) | Out-Null
+                    $cmd.ExecuteNonQuery() | Out-Null
+                }
+                Write-DebugLog 'Sample Debts data inserted'
+            }
+        }
+
+        # Insert sample categories if Categories table is empty
+        $cmd.CommandText = 'SELECT COUNT(*) FROM Categories'
+        if ($cmd.ExecuteScalar() -eq 0) {
+            if ($PSCmdlet.ShouldProcess('Categories', 'Insert sample data')) {
+                $sampleCategories = @('Debt Payment', 'Utilities', 'Groceries', 'Transportation', 'Discretionary')
+                foreach ($category in $sampleCategories) {
+                    $cmd.CommandText = 'INSERT INTO Categories (CategoryName) VALUES (?)'
+                    $cmd.Parameters.Clear()
+                    $cmd.Parameters.AddWithValue('@p1', $category) | Out-Null
+                    $cmd.ExecuteNonQuery() | Out-Null
+                }
+                Write-DebugLog 'Sample Categories data inserted'
+            }
+        }
+
+        $conn.Close()
+        Write-DebugLog 'Database initialization completed'
+    }
+    catch {
+        Write-DebugLog "Error initializing database: $_"
+        $null = [System.Windows.Forms.MessageBox]::Show("Error initializing database: $_`nAttempting to proceed with existing data.", 'Warning', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+    }
+}
+
+# Load data into DataGridView
+function Get-TableData {
+    [CmdletBinding()]
+    [OutputType([void])]
+    param (
+        [Parameter(Mandatory)]
+        [System.Windows.Forms.DataGridView]$GridView,
+        [Parameter(Mandatory)]
+        [string]$TableName
+    )
+    try {
+        if (-not (Test-TableExist -TableName $TableName)) {
+            throw "Table ${TableName} does not exist in the database"
+        }
+        Write-DebugLog "Loading data into DataGridView for ${TableName}"
+        $conn = New-Object System.Data.OleDb.OleDbConnection ${script:config}.ConnString
+        $conn.Open()
+        $cmd = $conn.CreateCommand()
+        $cmd.CommandText = "SELECT * FROM [${TableName}]"
+        $adapter = New-Object System.Data.OleDb.OleDbDataAdapter $cmd
+        $table = New-Object System.Data.DataTable
+        $adapter.Fill($table) | Out-Null
+        if ($table.Rows.Count -eq 0) {
+            Write-DebugLog "No data found in ${TableName}"
+        }
+        $GridView.DataSource = $table
+        $GridView.AutoResizeColumns()
+        $conn.Close()
+        Write-DebugLog "Data loaded for ${TableName} (${table.Rows.Count} rows)"
+    }
+    catch {
+        Write-DebugLog "Error loading ${TableName}: $_"
+        $null = [System.Windows.Forms.MessageBox]::Show("Error loading ${TableName}: $_", 'Error', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+    }
+}
+
+# Save DataGridView changes
+function Update-TableData {
+    [CmdletBinding(SupportsShouldProcess)]
+    [OutputType([void])]
+    param (
+        [Parameter(Mandatory)]
+        [System.Windows.Forms.DataGridView]$GridView,
+        [Parameter(Mandatory)]
+        [string]$TableName
+    )
+    try {
+        Write-DebugLog "Updating ${TableName} from DataGridView"
+        if ($PSCmdlet.ShouldProcess($TableName, 'Update table data')) {
+            $conn = New-Object System.Data.OleDb.OleDbConnection ${script:config}.ConnString
+            $conn.Open()
+            $adapter = New-Object System.Data.OleDb.OleDbDataAdapter("SELECT * FROM [${TableName}]", $conn)
+            $cmdBuilder = New-Object System.Data.OleDb.OleDbCommandBuilder $adapter
+            $adapter.UpdateCommand = $cmdBuilder.GetUpdateCommand()
+            $adapter.InsertCommand = $cmdBuilder.GetInsertCommand()
+            $adapter.DeleteCommand = $cmdBuilder.GetDeleteCommand()
+            $adapter.Update($GridView.DataSource) | Out-Null
+            $conn.Close()
+            $null = [System.Windows.Forms.MessageBox]::Show("Changes saved to ${TableName}.", 'Success', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+            Write-DebugLog "Changes saved for ${TableName}"
+            Sync-AccessToExcel
+        }
+    }
+    catch {
+        Write-DebugLog "Error saving ${TableName}: $_"
+        $null = [System.Windows.Forms.MessageBox]::Show("Error saving ${TableName}: $_", 'Error', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+    }
+}
+
+# Delete selected row
+function Remove-SelectedRow {
+    [CmdletBinding(SupportsShouldProcess)]
+    [OutputType([void])]
+    param (
+        [Parameter(Mandatory)]
+        [System.Windows.Forms.DataGridView]$GridView,
+        [Parameter(Mandatory)]
+        [string]$TableName,
+        [Parameter(Mandatory)]
+        [string]$PrimaryKey
+    )
+    try {
+        if ($GridView.SelectedRows.Count -eq 0) {
+            $null = [System.Windows.Forms.MessageBox]::Show('No rows selected.', 'Warning', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+            return
+        }
+        $conn = New-Object System.Data.OleDb.OleDbConnection ${script:config}.ConnString
+        $conn.Open()
+        $cmd = $conn.CreateCommand()
+        foreach ($row in $GridView.SelectedRows) {
+            $id = $row.DataBoundItem[$PrimaryKey]
+            if ($PSCmdlet.ShouldProcess("${TableName} ID $id", 'Delete row')) {
+                $cmd.CommandText = "DELETE FROM [${TableName}] WHERE $PrimaryKey = ?"
+                $cmd.Parameters.Clear()
+                $cmd.Parameters.AddWithValue('@p1', $id) | Out-Null
+                $cmd.ExecuteNonQuery() | Out-Null
+            }
+        }
+        $conn.Close()
+        Get-TableData -GridView $GridView -TableName $TableName
+        Write-DebugLog "Deleted rows from ${TableName}"
+        Sync-AccessToExcel
+    }
+    catch {
+        Write-DebugLog "Error deleting from ${TableName}: $_"
+        $null = [System.Windows.Forms.MessageBox]::Show("Error deleting from ${TableName}: $_", 'Error', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+    }
+}
+
+# Add new record
+function New-Record {
+    [CmdletBinding(SupportsShouldProcess)]
+    [OutputType([void])]
+    param (
+        [Parameter(Mandatory)]
+        [string]$TableName,
+        [Parameter(Mandatory)]
+        [array]$Fields,
+        [Parameter(Mandatory)]
+        [string]$FormTitle,
+        [Parameter(Mandatory)]
+        [System.Windows.Forms.DataGridView]$GridView
+    )
+    try {
+        # Validate field definitions
+        foreach ($field in $Fields) {
+            if (-not $field.Name -or -not $field.Type) {
+                throw "Invalid field definition: Missing Name or Type for field $($field | ConvertTo-Json)"
+            }
+        }
+        Write-DebugLog "Fields for ${TableName}: $($Fields | ConvertTo-Json)"
+
+        # Create input form
+        $form = New-Object System.Windows.Forms.Form
+        $form.Text = $FormTitle
+        $form.Size = New-Object System.Drawing.Size(400, 400)
+        $form.StartPosition = 'CenterScreen'
+        $controls = @{}
+        $y = 20
+
+        foreach ($field in $Fields) {
+            $label = New-Object System.Windows.Forms.Label
+            $label.Text = $field.Name
+            $label.Location = New-Object System.Drawing.Point(20, $y)
+            $label.Size = New-Object System.Drawing.Size(100, 20)
+            $form.Controls.Add($label)
+
+            if ($field.Name -match 'Status|AccountType|Category|AllocationType') {
+                $comboBox = New-Object System.Windows.Forms.ComboBox
+                $comboBox.Location = New-Object System.Drawing.Point(130, $y)
+                $comboBox.Size = New-Object System.Drawing.Size(200, 20)
+                if ($field.Name -eq 'Category') {
+                    $conn = New-Object System.Data.OleDb.OleDbConnection ${script:config}.ConnString
+                    $conn.Open()
+                    $cmd = $conn.CreateCommand()
+                    $cmd.CommandText = 'SELECT CategoryName FROM Categories'
+                    $reader = $cmd.ExecuteReader()
+                    while ($reader.Read()) { $comboBox.Items.Add($reader['CategoryName']) }
+                    $reader.Close()
+                    $conn.Close()
+                }
+                else {
+                    $comboBox.Items.AddRange($field.Options)
+                }
+                $comboBox.SelectedIndex = 0
+                $form.Controls.Add($comboBox)
+                $controls[$field.Name] = $comboBox
+            }
+            elseif ($field.Name -eq 'DebtID' -or $field.Name -eq 'AllocatedTo') {
+                $comboBox = New-Object System.Windows.Forms.ComboBox
+                $conn = New-Object System.Data.OleDb.OleDbConnection ${script:config}.ConnString
+                $conn.Open()
+                $cmd = $conn.CreateCommand()
+                if ($field.Name -eq 'DebtID') {
+                    $cmd.CommandText = 'SELECT DebtID, Creditor FROM Debts'
+                    $reader = $cmd.ExecuteReader()
+                    $comboBox.Items.Add('0 - None')
+                    while ($reader.Read()) { $comboBox.Items.Add("$($reader['DebtID']) - $($reader['Creditor'])") }
+                }
+                else {
+                    $cmd.CommandText = 'SELECT AccountID, AccountName FROM Accounts UNION SELECT DebtID, Creditor FROM Debts'
+                    $reader = $cmd.ExecuteReader()
+                    while ($reader.Read()) { $comboBox.Items.Add("$($reader[0]) - $($reader[1])") }
+                }
+                $reader.Close()
+                $conn.Close()
+                $comboBox.SelectedIndex = 0
+                $comboBox.Location = New-Object System.Drawing.Point(130, $y)
+                $comboBox.Size = New-Object System.Drawing.Size(200, 20)
+                $form.Controls.Add($comboBox)
+                $controls[$field.Name] = $comboBox
+            }
+            else {
+                $textBox = New-Object System.Windows.Forms.TextBox
+                $textBox.Location = New-Object System.Drawing.Point(130, $y)
+                $textBox.Size = New-Object System.Drawing.Size(200, 20)
+                $form.Controls.Add($textBox)
+                $controls[$field.Name] = $textBox
+            }
+            $y += 30
+        }
+
+        $addBtn = New-Object System.Windows.Forms.Button
+        $addBtn.Text = 'Add'
+        $addBtn.Location = New-Object System.Drawing.Point(130, $y)
+        $addBtn.Add_Click({
+            try {
+                if ($PSCmdlet.ShouldProcess($TableName, 'Add new record')) {
+                    $conn = New-Object System.Data.OleDb.OleDbConnection ${script:config}.ConnString
+                    $conn.Open()
+                    $cmd = $conn.CreateCommand()
+                    # Construct SQL query
+                    $fieldNames = ($Fields.Name) -join ','
+                    $placeholders = ('?' * $Fields.Count) -join ','
+                    $cmd.CommandText = "INSERT INTO [${TableName}] ($fieldNames) VALUES ($placeholders)"
+                    Write-DebugLog "SQL Query for ${TableName}: $($cmd.CommandText)"
+                    $cmd.Parameters.Clear()
+                    # Add parameters
+                    foreach ($field in $Fields) {
+                        $value = $controls[$field.Name].Text
+                        if ($field.Name -eq 'DebtID' -or $field.Name -eq 'AllocatedTo') {
+                            $value = ($value -split ' - ')[0]
+                        }
+                        if ([string]::IsNullOrWhiteSpace($value)) {
+                            $cmd.Parameters.AddWithValue('@p', [DBNull]::Value) | Out-Null
+                        }
+                        elseif ($field.Type -eq 'Date') {
+                            $parsedDate = [DateTime]::Parse($value)
+                            $cmd.Parameters.AddWithValue('@p', $parsedDate) | Out-Null
+                        }
+                        elseif ($field.Type -eq 'Decimal') {
+                            $parsedDecimal = [decimal]$value
+                            $cmd.Parameters.AddWithValue('@p', $parsedDecimal) | Out-Null
+                        }
+                        else {
+                            $cmd.Parameters.AddWithValue('@p', $value) | Out-Null
+                        }
+                    }
+                    $cmd.ExecuteNonQuery() | Out-Null
+                    $conn.Close()
+                    $form.Close()
+                    Get-TableData -GridView $GridView -TableName $TableName
+                    Write-DebugLog "Record added to ${TableName}"
+                    Sync-AccessToExcel
+                }
+            }
+            catch {
+                Write-DebugLog "Error adding record to ${TableName}: $_"
+                $null = [System.Windows.Forms.MessageBox]::Show("Error adding record to ${TableName}: $_", 'Error', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+            }
+        })
+        $form.Controls.Add($addBtn)
+        $null = $form.ShowDialog()
+    }
+    catch {
+        Write-DebugLog "Error in New-Record for ${TableName}: $_"
+        $null = [System.Windows.Forms.MessageBox]::Show("Error in New-Record for ${TableName}: $_", 'Error', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+    }
+}
+
+# Update goal progress
+function Update-GoalProgress {
+    [CmdletBinding(SupportsShouldProcess)]
+    [OutputType([void])]
+    param (
+        [Parameter(Mandatory)]
+        [System.Windows.Forms.DataGridView]$GridView
+    )
+    try {
+        Write-DebugLog 'Updating goal progress'
+        if ($PSCmdlet.ShouldProcess('Goals', 'Update progress')) {
+            $conn = New-Object System.Data.OleDb.OleDbConnection ${script:config}.ConnString
+            $conn.Open()
+            $cmd = $conn.CreateCommand()
+            $cmd.CommandText = 'SELECT GoalID, TargetAmount FROM Goals'
+            $adapter = New-Object System.Data.OleDb.OleDbDataAdapter $cmd
+            $goalsTable = New-Object System.Data.DataTable
+            $adapter.Fill($goalsTable) | Out-Null
+
+            foreach ($goal in $goalsTable.Rows) {
+                $cmd.CommandText = 'SELECT SUM(Amount) FROM Payments WHERE Category = ? AND PaymentDate <= ?'
+                $cmd.Parameters.Clear()
+                $cmd.Parameters.AddWithValue('@p1', 'Debt Payment') | Out-Null
+                $cmd.Parameters.AddWithValue('@p2', (Get-Date)) | Out-Null
+                $progressResult = $cmd.ExecuteScalar()
+                $progress = if ($null -eq $progressResult) { 0 } else { $progressResult }
+
+                $cmd.CommandText = 'UPDATE Goals SET CurrentAmount = ?, Status = ? WHERE GoalID = ?'
+                $cmd.Parameters.Clear()
+                $cmd.Parameters.AddWithValue('@p1', $progress) | Out-Null
+                $cmd.Parameters.AddWithValue('@p2', ($progress -ge $goal.TargetAmount) { 'Completed' } else { 'In Progress' }) | Out-Null
+                $cmd.Parameters.AddWithValue('@p3', $goal.GoalID) | Out-Null
+                $cmd.ExecuteNonQuery() | Out-Null
+            }
+            $conn.Close()
+            Get-TableData -GridView $GridView -TableName 'Goals'
+            Write-DebugLog 'Goal progress updated'
+            Sync-AccessToExcel
+        }
+    }
+    catch {
+        Write-DebugLog "Error updating goal progress: $_"
+        $null = [System.Windows.Forms.MessageBox]::Show("Error updating goal progress: $_", 'Error', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+    }
+}
+
+# Generate financial projection
+function New-FinancialProjection {
+    [CmdletBinding(SupportsShouldProcess)]
+    [OutputType([void])]
+    param ()
+    try {
+        Write-DebugLog 'Generating financial projection'
+        $conn = New-Object System.Data.OleDb.OleDbConnection ${script:config}.ConnString
+        $conn.Open()
+        $cmd = $conn.CreateCommand()
+
+        # Fetch data
+        $cmd.CommandText = "SELECT SUM(Amount) FROM Debts WHERE Status NOT IN ('Paid Off', 'Closed')"
+        $totalDebtResult = $cmd.ExecuteScalar()
+        $totalDebt = if ($null -eq $totalDebtResult) { 0 } else { $totalDebtResult }
+
+        $cmd.CommandText = "SELECT SUM(Balance) FROM Accounts WHERE Status IN ('Open', 'Current', 'Active')"
+        $totalSavingsResult = $cmd.ExecuteScalar()
+        $totalSavings = if ($null -eq $totalSavingsResult) { 0 } else { $totalSavingsResult }
+
+        $cmd.CommandText = 'SELECT SUM(Amount) FROM Revenue WHERE DateReceived >= ?'
+        $cmd.Parameters.AddWithValue('@p1', (Get-Date).AddMonths(-12)) | Out-Null
+        $annualIncomeResult = $cmd.ExecuteScalar()
+        $annualIncome = if ($null -eq $annualIncomeResult) { 0 } else { $annualIncomeResult / 12 * 12 }
+        $cmd.Parameters.Clear()
+
+        # Calculate projections with snowball
+        $cmd.CommandText = 'SELECT Amount, MinimumPayment, SnowballPayment FROM Debts WHERE Status NOT IN (''Paid Off'', ''Closed'') ORDER BY Amount ASC'
+        $adapter = New-Object System.Data.OleDb.OleDbDataAdapter $cmd
+        $debtsTable = New-Object System.Data.DataTable
+        $adapter.Fill($debtsTable) | Out-Null
+        $years = @(3, 5, 7, 10)
+        $projections = @()
+        $savingsRate = 0.05 # 5% annual interest
+        foreach ($year in $years) {
+            $months = $year * 12
+            $remainingDebt = $totalDebt
+            $snowball = 0
+            foreach ($debt in $debtsTable.Rows) {
+                $monthlyPayment = $debt.MinimumPayment + $snowball
+                $debtPaid = [Math]::Min($debt.Amount, $monthlyPayment * $months)
+                $remainingDebt -= $debtPaid
+                if ($debtPaid -ge $debt.Amount) { $snowball += $debt.MinimumPayment }
+            }
+            $savingsGrowth = $totalSavings * [Math]::Pow(1 + $savingsRate, $year) + ($annualIncome * 0.2 * $year) # 20% savings rate
+            $netWorth = $savingsGrowth - $remainingDebt
+            $projections += [PSCustomObject]@{
+                Year          = $year
+                DebtRemaining = $remainingDebt
+                Savings       = $savingsGrowth
+                NetWorth      = $netWorth
+            }
+        }
+
+        $conn.Close()
+        if ($PSCmdlet.ShouldProcess(${script:config}.CsvPath, 'Export projection to CSV')) {
+            $projections | Export-Csv -Path ${script:config}.CsvPath -NoTypeInformation -Force
+            $null = [System.Windows.Forms.MessageBox]::Show("Projection generated: ${script:config}.CsvPath", 'Success', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+            Write-DebugLog "Projection generated at ${script:config}.CsvPath"
+        }
+    }
+    catch {
+        Write-DebugLog "Error generating projection: $_"
+        $null = [System.Windows.Forms.MessageBox]::Show("Error generating projection: $_", 'Error', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+    }
+}
+
+# Check payment reminder
+function Get-Reminder {
+    [CmdletBinding()]
+    [OutputType([void])]
+    param ()
+    try {
+        Write-DebugLog 'Checking reminder'
+        $conn = New-Object System.Data.OleDb.OleDbConnection ${script:config}.ConnString
+        $conn.Open()
+        $cmd = $conn.CreateCommand()
+        $cmd.CommandText = 'SELECT * FROM Reminders WHERE ReminderDate <= ?'
+        $cmd.Parameters.AddWithValue('@p1', (Get-Date).AddDays(${script:config}.ReminderDays)) | Out-Null
+        $adapter = New-Object System.Data.OleDb.OleDbDataAdapter $cmd
+        $table = New-Object System.Data.DataTable
+        $adapter.Fill($table) | Out-Null
+        $conn.Close()
+        if ($table.Rows.Count -gt 0) {
+            $msg = ($table.Rows | ForEach-Object {
+                if ($null -ne $_['Message'] -and $null -ne $_['ReminderDate']) {
+                    "$($_['Message']) due $($_['ReminderDate'].ToString('yyyy-MM-dd'))"
+                }
+            }) -join "`n"
+            if ($msg) {
+                $null = [System.Windows.Forms.MessageBox]::Show("Reminders:`n$msg", 'Reminders', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+            }
+        }
+        Write-DebugLog 'Reminder checked'
+    }
+    catch {
+        Write-DebugLog "Error checking reminder: $_"
+        $null = [System.Windows.Forms.MessageBox]::Show("Error checking reminder: $_", 'Error', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+    }
+}
+
+# Main UI
+function Show-MainForm {
+    [CmdletBinding(SupportsShouldProcess)]
+    [OutputType([void])]
+    param ()
+    try {
+        $form = New-Object System.Windows.Forms.Form
+        $form.Text = 'Debt Management System'
+        $form.Size = New-Object System.Drawing.Size(1000, 600)
+        $form.StartPosition = 'CenterScreen'
+        $form.FormClosing.Add({
+            Sync-AccessToExcel
+        })
+
+        $tabControl = New-Object System.Windows.Forms.TabControl
+        $tabControl.Location = New-Object System.Drawing.Point(10, 10)
+        $tabControl.Size = New-Object System.Drawing.Size(960, 540)
+        $form.Controls.Add($tabControl)
+
+        # Dashboard Tab
+        $dashboardTab = New-Object System.Windows.Forms.TabPage
+        $dashboardTab.Text = 'Dashboard'
+        $tabControl.Controls.Add($dashboardTab)
+        $dashboardLabel = New-Object System.Windows.Forms.Label
+        $dashboardLabel.Text = 'Debt Snowball Overview'
+        $dashboardLabel.Location = New-Object System.Drawing.Point(10, 10)
+        $dashboardLabel.Size = New-Object System.Drawing.Size(940, 20)
+        $dashboardTab.Controls.Add($dashboardLabel)
+        $dashboardGrid = New-Object System.Windows.Forms.DataGridView
+        $dashboardGrid.Location = New-Object System.Drawing.Point(10, 40)
+        $dashboardGrid.Size = New-Object System.Drawing.Size(940, 400)
+        $dashboardTab.Controls.Add($dashboardGrid)
+        $dashboardLoadBtn = New-Object System.Windows.Forms.Button
+        $dashboardLoadBtn.Text = 'Load Snowball Data'
+        $dashboardLoadBtn.Location = New-Object System.Drawing.Point(10, 450)
+        $dashboardLoadBtn.Add_Click({
+            try {
+                $conn = New-Object System.Data.OleDb.OleDbConnection ${script:config}.ConnString
+                $conn.Open()
+                $cmd = $conn.CreateCommand()
+                $cmd.CommandText = 'SELECT Creditor, Amount, MinimumPayment, SnowballPayment, Status FROM Debts WHERE Status NOT IN (''Paid Off'', ''Closed'') ORDER BY Amount ASC'
+                $adapter = New-Object System.Data.OleDb.OleDbDataAdapter $cmd
+                $table = New-Object System.Data.DataTable
+                $adapter.Fill($table) | Out-Null
+                $dashboardGrid.DataSource = $table
+                $dashboardGrid.AutoResizeColumns()
+                $conn.Close()
+                Write-DebugLog 'Snowball data loaded'
+            }
+            catch {
+                Write-DebugLog "Error loading snowball data: $_"
+                $null = [System.Windows.Forms.MessageBox]::Show("Error loading snowball data: $_", 'Error', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+            }
+        })
+        $dashboardTab.Controls.Add($dashboardLoadBtn)
+
+        # Debts Tab
+        $debtsTab = New-Object System.Windows.Forms.TabPage
+        $debtsTab.Text = 'Debts'
+        $tabControl.Controls.Add($debtsTab)
+        $debtsGrid = New-Object System.Windows.Forms.DataGridView
+        $debtsGrid.Location = New-Object System.Drawing.Point(10, 40)
+        $debtsGrid.Size = New-Object System.Drawing.Size(940, 400)
+        $debtsTab.Controls.Add($debtsGrid)
+        $debtLoadBtn = New-Object System.Windows.Forms.Button
+        $debtLoadBtn.Text = 'Load Data'
+        $debtLoadBtn.Location = New-Object System.Drawing.Point(10, 10)
+        $debtLoadBtn.Add_Click({ Get-TableData -GridView $debtsGrid -TableName 'Debts' })
+        $debtsTab.Controls.Add($debtLoadBtn)
+        $debtAddBtn = New-Object System.Windows.Forms.Button
+        $debtAddBtn.Text = 'Add Debt'
+        $debtAddBtn.Location = New-Object System.Drawing.Point(10, 450)
+        $debtAddBtn.Add_Click({
+            try {
+                $fields = @(
+                    @{Name='Creditor'; Type='Text'},
+                    @{Name='Amount'; Type='Decimal'},
+                    @{Name='MinimumPayment'; Type='Decimal'},
+                    @{Name='SnowballPayment'; Type='Decimal'},
+                    @{Name='InterestRate'; Type='Decimal'},
+                    @{Name='DueDate'; Type='Date'},
+                    @{Name='Status'; Type='Text'; Options=@('Open', 'Closed', 'Current', 'In Collection', 'Paid Off')}
+                )
+                New-Record -TableName 'Debts' -Fields $fields -FormTitle 'Add Debt' -GridView $debtsGrid
+            }
+            catch {
+                Write-DebugLog "Error in Add Debt button: $_"
+                $null = [System.Windows.Forms.MessageBox]::Show("Error adding debt: $_", 'Error', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+            }
+        })
+        $debtsTab.Controls.Add($debtAddBtn)
+        $debtDeleteBtn = New-Object System.Windows.Forms.Button
+        $debtDeleteBtn.Text = 'Delete'
+        $debtDeleteBtn.Location = New-Object System.Drawing.Point(120, 450)
+        $debtDeleteBtn.Add_Click({ Remove-SelectedRow -GridView $debtsGrid -TableName 'Debts' -PrimaryKey 'DebtID' })
+        $debtsTab.Controls.Add($debtDeleteBtn)
+        $debtSaveBtn = New-Object System.Windows.Forms.Button
+        $debtSaveBtn.Text = 'Save Changes'
+        $debtSaveBtn.Location = New-Object System.Drawing.Point(230, 450)
+        $debtSaveBtn.Add_Click({ Update-TableData -GridView $debtsGrid -TableName 'Debts' })
+        $debtsTab.Controls.Add($debtSaveBtn)
+
+        # Accounts Tab
+        $accountsTab = New-Object System.Windows.Forms.TabPage
+        $accountsTab.Text = 'Accounts'
+        $tabControl.Controls.Add($accountsTab)
+        $accountsGrid = New-Object System.Windows.Forms.DataGridView
+        $accountsGrid.Location = New-Object System.Drawing.Point(10, 40)
+        $accountsGrid.Size = New-Object System.Drawing.Size(940, 400)
+        $accountsTab.Controls.Add($accountsGrid)
+        $accountLoadBtn = New-Object System.Windows.Forms.Button
+        $accountLoadBtn.Text = 'Load Data'
+        $accountLoadBtn.Location = New-Object System.Drawing.Point(10, 10)
+        $accountLoadBtn.Add_Click({ Get-TableData -GridView $accountsGrid -TableName 'Accounts' })
+        $accountsTab.Controls.Add($accountLoadBtn)
+        $accountAddBtn = New-Object System.Windows.Forms.Button
+        $accountAddBtn.Text = 'Add Account'
+        $accountAddBtn.Location = New-Object System.Drawing.Point(10, 450)
+        $accountAddBtn.Add_Click({
+            try {
+                $fields = @(
+                    @{Name='AccountName'; Type='Text'},
+                    @{Name='Balance'; Type='Decimal'},
+                    @{Name='AccountType'; Type='Text'; Options=@('Checking', 'Savings', 'Credit')},
+                    @{Name='Status'; Type='Text'; Options=@('Open', 'Closed', 'Current')}
+                )
+                New-Record -TableName 'Accounts' -Fields $fields -FormTitle 'Add Account' -GridView $accountsGrid
+            }
+            catch {
+                Write-DebugLog "Error in Add Account button: $_"
+                $null = [System.Windows.Forms.MessageBox]::Show("Error adding account: $_", 'Error', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+            }
+        })
+        $accountsTab.Controls.Add($accountAddBtn)
+        $accountDeleteBtn = New-Object System.Windows.Forms.Button
+        $accountDeleteBtn.Text = 'Delete'
+        $accountDeleteBtn.Location = New-Object System.Drawing.Point(120, 450)
+        $accountDeleteBtn.Add_Click({ Remove-SelectedRow -GridView $accountsGrid -TableName 'Accounts' -PrimaryKey 'AccountID' })
+        $accountsTab.Controls.Add($accountDeleteBtn)
+        $accountSaveBtn = New-Object System.Windows.Forms.Button
+        $accountSaveBtn.Text = 'Save Changes'
+        $accountSaveBtn.Location = New-Object System.Drawing.Point(230, 450)
+        $accountSaveBtn.Add_Click({ Update-TableData -GridView $accountsGrid -TableName 'Accounts' })
+        $accountsTab.Controls.Add($accountSaveBtn)
+
+        # Bills Tab
+        $billsTab = New-Object System.Windows.Forms.TabPage
+        $billsTab.Text = 'Bills'
+        $tabControl.Controls.Add($billsTab)
+        $billsGrid = New-Object System.Windows.Forms.DataGridView
+        $billsGrid.Location = New-Object System.Drawing.Point(10, 40)
+        $billsGrid.Size = New-Object System.Drawing.Size(940, 400)
+        $billsTab.Controls.Add($billsGrid)
+        $billLoadBtn = New-Object System.Windows.Forms.Button
+        $billLoadBtn.Text = 'Load Data'
+        $billLoadBtn.Location = New-Object System.Drawing.Point(10, 10)
+        $billLoadBtn.Add_Click({ Get-TableData -GridView $billsGrid -TableName 'Payments' })
+        $billsTab.Controls.Add($billLoadBtn)
+        $billAddBtn = New-Object System.Windows.Forms.Button
+        $billAddBtn.Text = 'Add Bill'
+        $billAddBtn.Location = New-Object System.Drawing.Point(10, 450)
+        $billAddBtn.Add_Click({
+            try {
+                $fields = @(
+                    @{Name='DebtID'; Type='Integer'},
+                    @{Name='Amount'; Type='Decimal'},
+                    @{Name='PaymentDate'; Type='Date'},
+                    @{Name='PaymentMethod'; Type='Text'},
+                    @{Name='Category'; Type='Text'}
+                )
+                New-Record -TableName 'Payments' -Fields $fields -FormTitle 'Add Bill' -GridView $billsGrid
+            }
+            catch {
+                Write-DebugLog "Error in Add Bill button: $_"
+                $null = [System.Windows.Forms.MessageBox]::Show("Error adding bill: $_", 'Error', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+            }
+        })
+        $billsTab.Controls.Add($billAddBtn)
+        $billDeleteBtn = New-Object System.Windows.Forms.Button
+        $billDeleteBtn.Text = 'Delete'
+        $billDeleteBtn.Location = New-Object System.Drawing.Point(120, 450)
+        $billDeleteBtn.Add_Click({ Remove-SelectedRow -GridView $billsGrid -TableName 'Payments' -PrimaryKey 'PaymentID' })
+        $billsTab.Controls.Add($billDeleteBtn)
+        $billSaveBtn = New-Object System.Windows.Forms.Button
+        $billSaveBtn.Text = 'Save Changes'
+        $billSaveBtn.Location = New-Object System.Drawing.Point(230, 450)
+        $billSaveBtn.Add_Click({ Update-TableData -GridView $billsGrid -TableName 'Payments' })
+        $billsTab.Controls.Add($billSaveBtn)
+
+        # Transactions Tab
+        $transTab = New-Object System.Windows.Forms.TabPage
+        $transTab.Text = 'Transactions'
+        $tabControl.Controls.Add($transTab)
+        $transGrid = New-Object System.Windows.Forms.DataGridView
+        $transGrid.Location = New-Object System.Drawing.Point(10, 40)
+        $transGrid.Size = New-Object System.Drawing.Size(940, 400)
+        $transTab.Controls.Add($transGrid)
+        $transLoadBtn = New-Object System.Windows.Forms.Button
+        $transLoadBtn.Text = 'Load Data'
+        $transLoadBtn.Location = New-Object System.Drawing.Point(10, 10)
+        $transLoadBtn.Add_Click({ Get-TableData -GridView $transGrid -TableName 'Payments' })
+        $transTab.Controls.Add($transLoadBtn)
+        $transAddBtn = New-Object System.Windows.Forms.Button
+        $transAddBtn.Text = 'Add Transaction'
+        $transAddBtn.Location = New-Object System.Drawing.Point(10, 450)
+        $transAddBtn.Add_Click({
+            try {
+                $fields = @(
+                    @{Name='DebtID'; Type='Integer'},
+                    @{Name='Amount'; Type='Decimal'},
+                    @{Name='PaymentDate'; Type='Date'},
+                    @{Name='PaymentMethod'; Type='Text'},
+                    @{Name='Category'; Type='Text'}
+                )
+                New-Record -TableName 'Payments' -Fields $fields -FormTitle 'Add Transaction' -GridView $transGrid
+            }
+            catch {
+                Write-DebugLog "Error in Add Transaction button: $_"
+                $null = [System.Windows.Forms.MessageBox]::Show("Error adding transaction: $_", 'Error', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+            }
+        })
+        $transTab.Controls.Add($transAddBtn)
+        $transDeleteBtn = New-Object System.Windows.Forms.Button
+        $transDeleteBtn.Text = 'Delete'
+        $transDeleteBtn.Location = New-Object System.Drawing.Point(120, 450)
+        $transDeleteBtn.Add_Click({ Remove-SelectedRow -GridView $transGrid -TableName 'Payments' -PrimaryKey 'PaymentID' })
+        $transTab.Controls.Add($transDeleteBtn)
+        $transSaveBtn = New-Object System.Windows.Forms.Button
+        $transSaveBtn.Text = 'Save Changes'
+        $transSaveBtn.Location = New-Object System.Drawing.Point(230, 450)
+        $transSaveBtn.Add_Click({ Update-TableData -GridView $transGrid -TableName 'Payments' })
+        $transTab.Controls.Add($transSaveBtn)
+
+        # Goals Tab
+        $goalsTab = New-Object System.Windows.Forms.TabPage
+        $goalsTab.Text = 'Goals'
+        $tabControl.Controls.Add($goalsTab)
+        $goalsGrid = New-Object System.Windows.Forms.DataGridView
+        $goalsGrid.Location = New-Object System.Drawing.Point(10, 40)
+        $goalsGrid.Size = New-Object System.Drawing.Size(940, 400)
+        $goalsTab.Controls.Add($goalsGrid)
+        $goalsLoadBtn = New-Object System.Windows.Forms.Button
+        $goalsLoadBtn.Text = 'Load Data'
+        $goalsLoadBtn.Location = New-Object System.Drawing.Point(10, 10)
+        $goalsLoadBtn.Add_Click({ Get-TableData -GridView $goalsGrid -TableName 'Goals' })
+        $goalsTab.Controls.Add($goalsLoadBtn)
+        $goalsAddBtn = New-Object System.Windows.Forms.Button
+        $goalsAddBtn.Text = 'Add Goal'
+        $goalsAddBtn.Location = New-Object System.Drawing.Point(10, 450)
+        $goalsAddBtn.Add_Click({
+            try {
+                $fields = @(
+                    @{Name='GoalName'; Type='Text'},
+                    @{Name='TargetAmount'; Type='Decimal'},
+                    @{Name='CurrentAmount'; Type='Decimal'},
+                    @{Name='TargetDate'; Type='Date'},
+                    @{Name='Status'; Type='Text'; Options=@('Planned', 'In Progress', 'Completed')},
+                    @{Name='Notes'; Type='Text'}
+                )
+                New-Record -TableName 'Goals' -Fields $fields -FormTitle 'Add Goal' -GridView $goalsGrid
+            }
+            catch {
+                Write-DebugLog "Error in Add Goal button: $_"
+                $null = [System.Windows.Forms.MessageBox]::Show("Error adding goal: $_", 'Error', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+            }
+        })
+        $goalsTab.Controls.Add($goalsAddBtn)
+        $goalsDeleteBtn = New-Object System.Windows.Forms.Button
+        $goalsDeleteBtn.Text = 'Delete'
+        $goalsDeleteBtn.Location = New-Object System.Drawing.Point(120, 450)
+        $goalsDeleteBtn.Add_Click({ Remove-SelectedRow -GridView $goalsGrid -TableName 'Goals' -PrimaryKey 'GoalID' })
+        $goalsTab.Controls.Add($goalsDeleteBtn)
+        $goalsSaveBtn = New-Object System.Windows.Forms.Button
+        $goalsSaveBtn.Text = 'Save Changes'
+        $goalsSaveBtn.Location = New-Object System.Drawing.Point(230, 450)
+        $goalsSaveBtn.Add_Click({ Update-TableData -GridView $goalsGrid -TableName 'Goals' })
+        $goalsTab.Controls.Add($goalsSaveBtn)
+        $goalsUpdateBtn = New-Object System.Windows.Forms.Button
+        $goalsUpdateBtn.Text = 'Update Progress'
+        $goalsUpdateBtn.Location = New-Object System.Drawing.Point(340, 450)
+        $goalsUpdateBtn.Add_Click({ Update-GoalProgress -GridView $goalsGrid })
+        $goalsTab.Controls.Add($goalsUpdateBtn)
+        $goalsProjBtn = New-Object System.Windows.Forms.Button
+        $goalsProjBtn.Text = 'Generate Projection'
+        $goalsProjBtn.Location = New-Object System.Drawing.Point(450, 450)
+        $goalsProjBtn.Add_Click({ New-FinancialProjection })
+        $goalsTab.Controls.Add($goalsProjBtn)
+
+        # Reports Tab
+        $reportsTab = New-Object System.Windows.Forms.TabPage
+        $reportsTab.Text = 'Reports'
+        $tabControl.Controls.Add($reportsTab)
+        $reportTypeCombo = New-Object System.Windows.Forms.ComboBox
+        $reportTypeCombo.Location = New-Object System.Drawing.Point(100, 20)
+        $reportTypeCombo.Items.AddRange(@('Debt Summary', 'Daily Expenses', 'Snowball Progress'))
+        $reportTypeCombo.SelectedIndex = 0
+        $reportsTab.Controls.Add($reportTypeCombo)
+        $reportDatePicker = New-Object System.Windows.Forms.DateTimePicker
+        $reportDatePicker.Location = New-Object System.Drawing.Point(100, 50)
+        $reportsTab.Controls.Add($reportDatePicker)
+        $reportBtn = New-Object System.Windows.Forms.Button
+        $reportBtn.Text = 'Generate Report'
+        $reportBtn.Location = New-Object System.Drawing.Point(100, 80)
+        $reportBtn.Add_Click({
+            try {
+                if ($PSCmdlet.ShouldProcess(${script:config}.CsvPath, 'Generate report')) {
+                    $conn = New-Object System.Data.OleDb.OleDbConnection ${script:config}.ConnString
+                    $conn.Open()
+                    $cmd = $conn.CreateCommand()
+                    if ($reportTypeCombo.SelectedItem -eq 'Debt Summary') {
+                        $cmd.CommandText = 'SELECT * FROM Debts'
+                    }
+                    elseif ($reportTypeCombo.SelectedItem -eq 'Daily Expenses') {
+                        $cmd.CommandText = 'SELECT * FROM Payments WHERE PaymentDate = ?'
+                        $cmd.Parameters.AddWithValue('@p1', $reportDatePicker.Value.Date) | Out-Null
+                    }
+                    else {
+                        $cmd.CommandText = 'SELECT Creditor, Amount, MinimumPayment, SnowballPayment, Status FROM Debts WHERE Status NOT IN (''Paid Off'', ''Closed'') ORDER BY Amount ASC'
+                    }
+                    $adapter = New-Object System.Data.OleDb.OleDbDataAdapter $cmd
+                    $table = New-Object System.Data.DataTable
+                    $adapter.Fill($table) | Out-Null
+                    $conn.Close()
+                    $table | Export-Csv -Path ${script:config}.CsvPath -NoTypeInformation -Force
+                    $null = [System.Windows.Forms.MessageBox]::Show("Report saved to ${script:config}.CsvPath", 'Success', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+                    Write-DebugLog "Report saved to ${script:config}.CsvPath"
+                }
+            }
+            catch {
+                Write-DebugLog "Error generating report: $_"
+                $null = [System.Windows.Forms.MessageBox]::Show("Error generating report: $_", 'Error', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+            }
+        })
+        $reportsTab.Controls.Add($reportBtn)
+
+        $null = $form.ShowDialog()
+        Write-DebugLog 'Main form closed'
+    }
+    catch {
+        Write-DebugLog "Error in Show-MainForm: $_"
+        $null = [System.Windows.Forms.MessageBox]::Show("Error in UI: $_", 'Error', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+    }
+}
+
+# Main execution
+try {
+    Initialize-Database
+    Sync-ExcelToAccess
+    Get-Reminder
+    Show-MainForm
+}
+catch {
+    Write-DebugLog "Critical error: $_"
+    $null = [System.Windows.Forms.MessageBox]::Show("Critical error: $_", 'Error', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+}

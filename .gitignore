@@ -1,0 +1,13 @@
+# Ignore database files
+*.accdb
+*.mdb
+
+# Ignore Excel log files
+logs/
+*.log.xlsx
+*.log.xls
+
+# Ignore temporary or backup files
+~$*
+*.tmp
+*.bak
