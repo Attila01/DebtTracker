@@ -2,7 +2,7 @@
 # Purpose: Handles the initial creation of the SQLite database and its tables,
 #          including inserting predefined categories.
 # Deploy in: C:\DebtTracker
-# Version: 1.5 (2025-07-19) - Confirmed dynamic schema generation handles new columns from config.py.
+# Version: 1.5 (2025-07-21) - Confirmed dynamic schema generation handles new columns from config.py.
 #          Re-engineered table creation to dynamically build SQL
 #          from TABLE_SCHEMAS['columns'] instead of using a 'create_sql' key.
 #          Incorporated logic to add missing columns to existing tables.
@@ -44,22 +44,21 @@ def initialize_database():
         if os.path.exists(DB_PATH):
             try:
                 conn = sqlite3.connect(DB_PATH)
-                conn.row_factory = sqlite3.Row # Ensure row_factory is set for consistency
+                conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
-                # Attempt a simple query to verify it's a valid SQLite DB
                 cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
                 logging.info(f"Existing database file '{DB_PATH}' is a valid SQLite database.")
             except sqlite3.DatabaseError as e:
                 logging.critical(f"Critical database initialization error: {e}")
                 logging.critical(f"Existing file at '{DB_PATH}' is not a valid SQLite database. Please delete or move it if you want to create a new one.")
-                raise # Re-raise to stop execution if DB is corrupt
+                raise
         else:
             logging.info(f"Database file not found. Attempting to create: {DB_PATH}")
-            conn = sqlite3.connect(DB_PATH) # This creates the file
-            conn.row_factory = sqlite3.Row # Ensure row_factory is set for consistency
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
             logging.info(f"Database file created successfully: {DB_PATH}")
 
-        if conn is None: # Should not happen if previous steps are successful
+        if conn is None:
             raise Exception("Failed to establish database connection.")
 
         cursor = conn.cursor()
@@ -94,7 +93,7 @@ def initialize_database():
 
                 # After creating/ensuring table, check for missing columns and add them
                 cursor.execute(f"PRAGMA table_info({table_name});")
-                existing_columns = [info[1] for info in cursor.fetchall()] # info[1] is column name
+                existing_columns = [info[1] for info in cursor.fetchall()]
 
                 for col in schema['columns']:
                     if col['name'] not in existing_columns:
@@ -119,35 +118,34 @@ def initialize_database():
 
             except sqlite3.OperationalError as e:
                 logging.error(f"Error creating/updating table {table_name}: {e}")
-                raise # Re-raise if table creation itself fails
+                raise
             except Exception as e:
                 logging.critical(f"CRITICAL ERROR: Failed to create/update table {table_name}: {e}")
-                raise # Stop if a critical table cannot be created
+                raise
 
-        # Special handling for Categories table: insert predefined categories if empty
-        # This block should be outside the main table creation loop to ensure Categories table is ready
+        # Insert predefined categories if the Categories table is empty
         cursor.execute("SELECT COUNT(*) FROM Categories")
         if cursor.fetchone()[0] == 0:
             logging.info("Categories table is empty. Inserting predefined categories.")
-            for category_name in PREDEFINED_CATEGORIES: # PREDEFINED_CATEGORIES is a list of strings
+            for category_name in PREDEFINED_CATEGORIES:
                 try:
                     cursor.execute("INSERT INTO Categories (CategoryName) VALUES (?)", (category_name,))
                     conn.commit()
-                except sqlite3.IntegrityError: # In case of unique constraint violation
+                except sqlite3.IntegrityError:
                     logging.warning(f"Category '{category_name}' already exists, skipping insertion.")
             logging.info("Predefined categories inserted successfully.")
         else:
             logging.info("Categories table already contains data. Skipping predefined category insertion.")
 
-        conn.commit() # Final commit for any pending changes
+        conn.commit()
         logging.info("Database initialization process completed.")
 
     except sqlite3.Error as e:
         logging.critical(f"Overall Database initialization failed: {e}", exc_info=True)
-        raise # Re-raise the exception to be caught by the orchestrator/GUI
+        raise
     except Exception as e:
         logging.critical(f"An unexpected error occurred during database initialization: {e}", exc_info=True)
-        raise # Re-raise the exception
+        raise
     finally:
         if conn:
             conn.close()

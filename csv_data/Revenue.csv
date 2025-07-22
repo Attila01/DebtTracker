@@ -1,1 +1,1 @@
-RevenueID,Amount,DateReceived,Source,AllocatedTo,AllocationType,NextProjectedIncome,NextProjectedIncomeDate,AccountID
+RevenueID,SourceName,Amount,DateReceived,Allocations

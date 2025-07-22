@@ -1,1 +1,7 @@
-AccountID,AccountName,Balance,AccountType,Status,AccountLimit,InitialBalance
+AccountID,AccountName,AccountType,Balance,Status
+1,Robinhood,Investment,3680.0,Open
+2,Crypto,Investment,99.75,Open
+3,bynance,Investment,235.52,Open
+4,Roundpoint,Loan,"363,182.68",Open
+5,Cred.ai,Checking,1575.96,Open
+6,Credit One Visa6699,Credit Card,958.06,Open

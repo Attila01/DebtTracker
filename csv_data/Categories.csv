@@ -5,7 +5,7 @@ CategoryID,CategoryName
 4,Transportation
 5,Healthcare
 6,Insurance
-7,Debt Payment
+7,Loan Payment
 8,Savings
 9,Investments
 10,Education
@@ -20,3 +20,7 @@ CategoryID,CategoryName
 19,Bonus
 20,Refund
 21,Interest Income
+23,Loan
+24,Credit Card
+25,Crypto Investment
+26,Leasure

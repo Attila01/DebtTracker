@@ -4,7 +4,7 @@
 #          2. Performs initial data synchronization from SQLite to CSV files.
 #          3. Launches the main Python GUI script.
 # Deploy in: C:\DebtTracker
-# Version: 1.6 (2025-07-19) - Critical fix for WinError 87 during GUI launch.
+# Version: 1.6 (2025-07-21) - Critical fix for WinError 87 during GUI launch.
 #                            Uses a more compatible subprocess.Popen call for Windows Store Python.
 
 import os
@@ -65,13 +65,9 @@ def run_python_gui_script(script_path, script_name):
         raise FileNotFoundError(f"{script_name} not found.")
 
     try:
-        # Use a simple Popen call without complex creationflags or shell=True initially.
-        # This is often the most compatible for Windows Store Python.
-        # It might open a console window for the GUI, but it should launch reliably.
         subprocess.Popen([PYTHON_EXECUTABLE, script_path])
-
         logging.info(f"{script_name} launched (potentially with a new console window).")
-        time.sleep(0.5) # Give it a moment to start
+        time.sleep(0.5)
 
     except Exception as e:
         logging.critical(f"CRITICAL ERROR: Failed to launch GUI script {script_name}: {e}", exc_info=True)

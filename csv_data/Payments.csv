@@ -1,1 +1,1 @@
-PaymentID,DebtID,AccountID,Amount,PaymentDate,PaymentMethod,CategoryID,Notes
+PaymentID,SourceAccountID,DestinationAccountID,Amount,PaymentDate,CategoryID,Notes

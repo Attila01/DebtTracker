@@ -1,1 +1,1 @@
-DebtID,Creditor,OriginalAmount,Amount,AmountPaid,MinimumPayment,SnowballPayment,InterestRate,DueDate,Status,CategoryID,AccountID
+DebtID,AccountID,InterestRate,MinimumPayment,DueDate

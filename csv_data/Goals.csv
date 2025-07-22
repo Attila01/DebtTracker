@@ -1,1 +1,3 @@
-GoalID,GoalName,TargetAmount,CurrentAmount,TargetDate,Status,Notes,AccountID
+GoalID,GoalName,TargetAmount,TargetDate,Notes
+1,Perle car,5500.0,2025-10-21,
+2,Emergency Fund,15000.0,2026-12-31,6 months of expenses
