@@ -1,5 +1,5 @@
 # Ignore database files
-*.accdb
+*.db
 *.mdb
 # Ignore Excel log files
 /logs/

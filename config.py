@@ -1,6 +1,6 @@
 # config.py
 # Purpose: Centralized configuration for the Debt Management System.
-# Version: 2.3 (2025-07-21) - Removed circular import to fix application launch error.
+# Version: 2.4 (2025-07-21) - Corrected Debts schema by removing the redundant 'Creditor' column.
 
 import os
 

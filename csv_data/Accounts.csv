@@ -5,3 +5,24 @@ AccountID,AccountName,AccountType,Balance,Status
 4,Roundpoint,Loan,"363,182.68",Open
 5,Cred.ai,Checking,1575.96,Open
 6,Credit One Visa6699,Credit Card,958.06,Open
+7,PNC Checking,Checking,2500.0,Active
+8,Ally Savings,Savings,10000.0,Active
+9,Vanguard Brokerage,Investment,50000.0,Active
+10,Chase Sapphire,Credit Card,-450.5,Active
+11,Car Loan,Loan,-15000.0,Active
+12,Electric Bill,Utilities,0.0,Active
+13,Car Insurance,Insurance,0.0,Active
+14,PNC Checking,Checking,2500.0,Active
+15,Ally Savings,Savings,10000.0,Active
+16,Vanguard Brokerage,Investment,50000.0,Active
+17,Chase Sapphire,Credit Card,-450.5,Active
+18,Car Loan,Loan,-15000.0,Active
+19,Electric Bill,Utilities,0.0,Active
+20,Car Insurance,Insurance,0.0,Active
+21,PNC Checking,Checking,2500.0,Active
+22,Ally Savings,Savings,10000.0,Active
+23,Vanguard Brokerage,Investment,50000.0,Active
+24,Chase Sapphire,Credit Card,-450.5,Active
+25,Car Loan,Loan,-15000.0,Active
+26,Electric Bill,Utilities,0.0,Active
+27,Car Insurance,Insurance,0.0,Active
